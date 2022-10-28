@@ -1,0 +1,160 @@
+---
+title: "Laboratorio 2"
+author: "Erik De Luca"
+date: "2022-10-21"
+output: 
+  html_document:
+    df_print: "paged"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(leaps)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(caret)
+library(glmnet)
+```
+
+## Analisi dei dati
+
+Importo il file **TL.csv** e visualizzo i dati. Le variabili `EDUCATION`, `NUMHH` e `MARSTAT` sono state trasformate in variabili fattoriali.
+
+```{r cars}
+tl = read.csv("dataset/TL.csv") %>% tibble %>% dplyr::select(-X)
+tl = tl %>% mutate_at(c( "MARSTAT"), as.factor)
+tl
+#"NUMHH", "EDUCATION",
+```
+
+## Trasformazione variabili
+
+Dal grafico sottostante è evidente come sia necessaria una trasformazione delle variabili `AGE` e `INCOME`. Attraverso un grafico del tipo scatola a baffi o un istogramma.
+
+```{r}
+ggplot(tl, aes(y = FACE, x = INCOME, col = AGE)) + 
+  geom_point()
+
+```
+
+```{r}
+ggplot(tl,aes(x = FACE)) + 
+  geom_histogram(bins = 50) + 
+  labs(title = "Istogramma della variabile FACE prima della trasformazione logaritmica")
+```
+
+```{r}
+tl = tl %>% mutate_at(c("FACE","INCOME"),log)
+ggplot(tl,aes(x = FACE, y = ..density..)) +  
+  geom_histogram(bins = 30,) +
+  geom_density() +
+  geom_density(color = "green",
+               fill = "green",
+               alpha = 0.1, # densità del colore 
+               kernel = "gaussian",
+               adjust = 2) +
+  labs(title = "Istogramma della variabile FACE dopo della trasformazione logaritmica")
+```
+
+## Modello
+
+```{r}
+# train = sample(c(1:dim(tl)[1]), .7*dim(tl)[1], replace = F)
+set.seed(1)
+train = createDataPartition(tl$AGE,p = .8,list = F)
+modAll = lm(FACE ~ ., data = tl, subset = train)
+gtsummary::tbl_regression(modAll) 
+```
+
+```{r}
+modFor = regsubsets(FACE ~ .,data = tl[train,],method = "forward")
+modFor %>% summary
+```
+
+```{r}
+modBack = MASS::stepAIC(modAll,direction = "backward")
+```
+
+## Scelta del modello
+
+```{r}
+predAll = predict.lm(modAll,newdata = tl[-train,])
+predBack = predict.lm(modBack,newdata = tl[-train,])
+data.frame(R2 = c(R2(predAll,tl[-train,"FACE"]),R2(predBack,tl[-train,"FACE"])),
+           row.names = c("Tutte le variabili", "Backward"))
+
+```
+
+### Validation set
+
+```{r}
+testMat = model.matrix(FACE~., data = tl[-train,])
+
+valErr = sapply(c(1:(length(tl)-1)),function(i) mean((tl$FACE[-train]-testMat[,names(coef(modFor, id = i))]%*%coef(modFor, id = i))^2))
+ggplot(data.frame(MSE = valErr, numeroDiVariabili = c(1:5)),
+       mapping = aes(y = MSE, x = numeroDiVariabili)) + 
+  geom_line() + 
+  geom_point()
+```
+
+Utilizzando l'approccio del set di validazione risulta migliore il modello con tutte e 5 le variabili indipendenti.
+
+### Cross validation
+
+Siccome non esiste il metodo `predict` per `regsubset` necessitiamo allora di specificarlo prima di poterlo chiamare in modo da semplificare i calcoli successivi. Nel punto precedento, invece, è stata scritta l'intera procedura. Si poteva seguire lo stesso procedimento anche in questo caso.
+
+Il pezzo di codice che definisce la funzione `predict` (copiato da web) è stato poi adattato in modo tale che potesse ricevere in input oggetti provenienti da liste o funzioni.
+
+```{r}
+predict.regsubsets = function(object, newdata, id, form = NULL, ...) 
+{
+  if(is.null(form))
+    form = as.formula(object$call[[2]])
+  mat = model.matrix(form, newdata)
+  coefi = coef(object, id = id)
+  mat[, names(coefi)] %*% coefi
+}
+```
+
+Nel seguente pezzo di codice si poteva evitare di utilizzare la funzione `map_dfc` andado a calcolare il valore medio fuori dal `sapply` ottenendo così un unico e valore, e successivamente applicare un altro `sapply` ottenendo questa volta un vettore anziché un dataframe.
+
+```{r}
+k = 10        # numero di folds
+set.seed(1)   
+folds = sample(1:k, nrow(tl), replace = TRUE)
+
+cvErr = purrr::map_dfc(c(1:k),function(j) sapply(c(1:5),function(i) mean((tl$FACE[folds==j]-predict(regsubsets(FACE~., data = tl[folds!=j,], nvmax=6), tl[folds == j,], id = i,form = as.formula(FACE~.)))^2)))
+
+cvErrMean = apply(cvErr,2,mean)
+
+ggplot(data.frame(MSE = cvErrMean, numeroDiVariabili = c(1:5)),
+       mapping = aes(y = MSE, x = numeroDiVariabili)) + 
+  geom_line() + 
+  geom_point()
+```
+
+Dal grafico soprastante si deduce che il miglior modello in questo caso è quello con 2 variabili.
+
+## Ridge e Lasso
+
+```{r}
+matTl = makeX(tl[,names(tl)!="FACE"])
+
+
+# per trovare lambda ottimale attraverso cross validation
+cvRidge = cv.glmnet(matTl, 
+                    tl$FACE,
+                    alpha = 0)
+
+cvLasso = cv.glmnet(matTl, 
+                    tl$FACE,
+                    alpha = 1)
+
+
+# lambda ottimale
+data.frame(Ridge = cvRidge$lambda.min,
+           Lasso = cvLasso$lambda.min, 
+           row.names = "Lambda ottimale")
+
+```

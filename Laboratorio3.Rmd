@@ -1,0 +1,150 @@
+---
+title: "Laboratorio 3"
+author: "Erik De Luca"
+date: "2022-10-21"
+output: 
+  html_document:
+    df_print: "kable"
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(tibble)
+library(dplyr)
+library(purrr)
+knitr::opts_chunk$set(echo = TRUE)
+df = read.csv("dataset/prostate.csv")[,-1] %>% 
+  as_tibble
+df$svi = df$svi %>% as.logical()
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(df)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+ggcorrplot::ggcorrplot(cor(df))
+```
+## Modello
+
+Visualizzo la variabile risposta per vedere se si distribuisce come una normale (condizione necessaria per stimare un modello di regressione lineare)
+
+```{r}
+ggplot(df,aes(x = lpsa)) + 
+  geom_density() + 
+  geom_density(color = "green",
+               fill = "green",
+               alpha = 0.1, # densità del colore 
+               kernel = "gaussian",
+               adjust = 2)
+```
+
+### Modello lineare
+
+```{r}
+modLin = lm(lpsa ~ .,data = df)
+summary(modLin)
+```
+
+### Modello polinomiale
+
+#### Creazione dei modelli
+
+Creo $n*m$ modelli polinomiali con $n$ numero delle variabili risposta e $m$ grado massimo con la quale decido di valutare il modello polinomiale.
+Nella tabella sottostante si possono visualizzare gli $R^2$ dei modelli.
+
+```{r}
+
+gradoMax = 10
+dfNumeric = df %>%
+  select_if(is.numeric)
+varIndip = names(df)[names(df)!=c("lpsa","svi","train")]
+modelli = lapply(X = c(1:length(dfNumeric)), function(col) lapply(X = c(1:gradoMax),
+                 function(grado) lm(lpsa ~ polym(unlist(as.vector(dfNumeric[,col])),degree = grado,raw = T),
+                                    data = df)))
+rDf = map_dfc(c(1:length(dfNumeric)),function(var) sapply(c(1:gradoMax),function(gr) summary(modelli[[var]][[gr]])$r.squared))
+names(rDf) = names(dfNumeric)
+rownames(rDf) = c(1:gradoMax)
+rDf
+
+```
+
+#### Scelta dei modelli
+
+La scelta del modello verrà fatta con l'analisi della varianza mediante la funzione `ANOVA` che dati dei modelli sceglie il modello meno complesso ma che allo stesso tempo spieghi sufficientemente bene i dati.
+Il processo verrà eseguito per ciascuna variabile risposta.
+
+```{r}
+do.call(anova,modelli[[1]])
+```
+
+La tabella soprastante si riferisce all'analisi della varianza per la variabile `lcavol`. 
+Osservando il valore $p$ dell statistica F si nota che i due polinomi migliori sono il modello cubico e il modello polinomiale di grado settimo.
+
+Di seguito viene applicata la procedura a tutte le variabili risposta.
+La tabella rappresenta il valore $p$ per ciascuna variabile e ciascun grado del modello polinomiale.
+
+```{r}
+anovaDf = map_dfc(c(1:length(dfNumeric)),function(var) do.call(anova,modelli[[var]])$`Pr(>F)`)
+names(anovaDf) = names(dfNumeric)
+rownames(anovaDf) = c(1:gradoMax)
+anovaDf
+```
+
+## Stima modello polinomiale
+
+Sono stati stimati i due modelli polinomiali presi in considerazione precedentemente: quello di grado 3 e quello di grado 7.
+Rappresentandoli su un grafico si nota come il modello polinomiale di grado 7 si adatti troppo ai dati, specialmente sugli outlier.
+Sarà preferibile, quindi, il modello polinomiale di grado 3 in modo tale che dia delle stime più affidabili.
+
+```{r}
+ggplot(df,aes(y = lpsa, x = lcavol)) +
+  geom_point() +
+  geom_smooth(method = "lm",
+              formula = y ~ poly(x,3),
+              color = "paleturquoise",
+              fill = "paleturquoise",
+              alpha = 0.3) +
+  geom_smooth(method = "lm",
+              formula = y ~ poly(x,7),
+              color = "orchid",
+              fill = "orchid",
+              alpha = 0.1)
+
+```
+## Grafico dei coefficienti
+
+```{r}
+mod = lm(lpsa ~ poly(lcavol,3), data = df)
+arm::coefplot(mod)
+```
+
+## Funzione a gradino
+
+```{r}
+coef(lm(lpsa ~ cut(lcavol,breaks = c(-1.1,0.2,1.5,2.8,5)), data = df))
+```
+
+
+
+```{r}
+ggplot(df,aes(y = lpsa, x = lcavol)) +
+  geom_point() +
+  geom_smooth(method = "lm",
+              formula = y ~ cut(x,breaks = c(-1.1,0.2,1.5,2.8,5)),
+              color = "paleturquoise",
+              fill = "paleturquoise",
+              alpha = 0.3)
+```
+
+

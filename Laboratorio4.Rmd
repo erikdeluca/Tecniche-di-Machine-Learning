@@ -1,0 +1,51 @@
+---
+title: "Laboratorio4"
+author: "Erik De Luca"
+date: "2022-10-28"
+output: 
+  html_document:
+    df_print: "paged"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(splines)
+library(mgcv)
+library(ggplot2)
+library(ggformula)
+```
+
+# Prima parte
+
+## Importo i dati
+
+```{r}
+sp = read.csv("dataset/splines_data.csv") %>% 
+  tibble %>%
+  column_to_rownames("X.1")
+colnames(sp) = c("x","y")
+sp
+```
+
+
+```{r}
+gg = ggplot(sp,aes(y = y, x = x)) +
+  geom_point()
+gg
+```
+
+```{r}
+modNs = lm(y ~ ns(x,df = 8, knots = c(-8,-7,-5,-2,-1,2.5)), data = sp) 
+modNs %>% summary
+```
+
+
+```{r}
+smooth.spline(y = sp$y,x = sp$x,df = 8,nknots = 5)
+gg +
+  geom_smooth(method = "lm", 
+              formula = modNs$call[[2]]) +
+  geom_spline(df = 20,nknots = 15)
+```
+
+CERCARE COME INSERIRE SMOOTH.SPLINES IN GEOM_SMOOTH DI GGPLOT

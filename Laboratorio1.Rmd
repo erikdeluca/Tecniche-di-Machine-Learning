@@ -1,0 +1,137 @@
+---
+title: "Laboratorio 1"
+author: "Erik De Luca"
+date: "2022-10-19"
+output: 
+  html_document:
+    df_print: "paged"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tibble)
+library(dplyr)
+library(MASS)
+```
+
+```{r}
+mc = as_tibble(mcycle)
+mc
+```
+
+## Suddivisione dataset
+
+Per suddividere il dataset si è dapprima impostato il seme per la generazione (pseudo)casuale dei numeri in modo tale da avere lo stesso risultato ogni volta che il codice girerà.
+
+`sequenza` serve a fare un riordinamento casuale del dataset, così poi da dividerlo in due parti, il 75% sarà destinato al dataset utilizzato per allenare il modello, mnetre il restante verrà utilizzato per testare la qualità del modello.
+
+```{r}
+set.seed(1)
+sequenza = sample(c(1:dim(mc)[1]),
+                            size = dim(mc)[1],
+                            replace = F)
+
+mcTraining = mc[sequenza[c(1:(0.75*dim(mc)[1]))],]
+mcTest = mc[sequenza[c((0.75*dim(mc)[1]):dim(mc)[1])],]
+```
+
+## Generazione Modelli
+
+```{r}
+modLin = lm(accel ~ times, data = mcTraining)
+modQuad = lm(accel ~ I(times**2), data = mcTraining)
+modCub = lm(accel ~ I(times**3), data = mcTraining)
+{
+  plot(x = mcTraining$times, 
+     y = mcTraining$accel)
+  asseX = seq(from = min(mcTraining$times),
+              to = max(mcTraining$times),
+              by = .1)
+  lines(x=asseX,
+        predict(modLin,data.frame(times=asseX)),
+        col = "green")
+  lines(x=asseX,
+        predict(modQuad,data.frame(times=asseX)),
+        col = "red")
+  lines(x=asseX,
+        predict(modCub,data.frame(times=asseX)),
+        col = "blue")
+  legend("bottomright",
+         c("Modello lineare","Modello quadratico","Modello cubico"),
+         col = c("green","red","blue"),
+         lwd = 1)
+
+}
+```
+
+### Tramite la funzione `poly`
+
+```{r}
+# modificando questo parametro si genereranno x modelli polinomiali fino al modello con polinomio grado x
+gradoMax = 6
+# ogni volta che il codice girerà i colori rimarranno sempre gli stessi per ogni modello
+set.seed(1)
+modelli = lapply(X = c(1:gradoMax),
+                 function(grado) lm(accel ~ poly(times,grado),
+                                    data = mcTraining))
+# creo una palette di colori evitando le scale di grigi
+colori = sample(grDevices::colors()[grep('gr(a|e)y', grDevices::colors(), invert = T)],
+                size = gradoMax,
+                replace = F)
+{
+  plot(x = mcTraining$times, 
+     y = mcTraining$accel)
+  asseX = seq(from = min(mcTraining$times),
+              to = max(mcTraining$times),
+              by = .1)
+  apply(X = c(1:gradoMax) %>% matrix,
+        1,
+        function(grado) lines(x=asseX,
+                              predict(modelli[[grado]],
+                              data.frame(times=asseX)),
+                              col = colori[grado]))
+  legend("bottomright",
+         stringr::str_c("grado ",c(1:gradoMax)),
+         col = colori,
+         lwd = 1,
+         cex = .6)
+}
+```
+
+Nel primo grafico si nota come il modello quadratico e cubico posseggano una derivata seconda quasi nulla e che quindi si comportino quasi come una retta. Nel secondo grafico, dove è stata introdotta la funzione `poly` si può osservare come i modelli si addatti molto di più ai dati.
+
+## Misura dell'addattamento
+
+Sfruttando la generazione precedente di modelli viene molto facile e veloce controllare la misura dell'addattamento sul training set, cossiché da vedere il modello che si adatta di più ai dati.
+
+```{r}
+gradoMax  = 20
+modelli = lapply(X = c(1:gradoMax),
+                 function(grado) lm(accel ~ poly(times,grado),
+                                    data = mcTraining))
+SSEtraining = sapply(c(1:gradoMax),function(grado) deviance(modelli[[grado]]))
+data.frame(Polinomio = stringr::str_c("grado ",c(1:gradoMax)),SSEtraining)
+```
+
+```{r}
+accelPredict = lapply(c(1:gradoMax),
+                      function(grado) predict(modelli[[grado]], newdata = mcTest))
+SSEtest = sapply(c(1:gradoMax), function(grado) sum((mcTest$accel-accelPredict[[grado]])**2))
+SST = sum((mcTest$accel-mean(mcTraining$accel))**2)
+R2 = 1 - SSEtest/SST
+```
+
+```{r,error=F}
+{
+  plot(SSEtraining/dim(mcTraining)[1],
+       type = "l",
+       ylim = c(0,max(SSEtest/dim(mcTest)[1])),
+       xlab = "Grado del polinomio",
+       ylab = "Devianza media")
+  lines(SSEtest/dim(mcTest)[1],type = "l",col = "green")
+  legend("topright",
+         col = c("green","black"),
+         lwd = 1,
+         c("Test set","Training set"),)
+}
+```
