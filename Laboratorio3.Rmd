@@ -5,6 +5,9 @@ date: "2022-10-21"
 output: 
   html_document:
     df_print: "kable"
+editor_options: 
+  markdown: 
+    wrap: sentence
 ---
 
 ```{r setup, include=FALSE}
@@ -12,29 +15,25 @@ library(ggplot2)
 library(tibble)
 library(dplyr)
 library(purrr)
+library(glmnet)
 knitr::opts_chunk$set(echo = TRUE)
 df = read.csv("dataset/prostate.csv")[,-1] %>% 
   as_tibble
 df$svi = df$svi %>% as.logical()
 ```
 
-## R Markdown
+## Analisi esplorativa dei dati
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
+```{r}
 summary(df)
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
+### Correlogramma
 
 ```{r pressure, echo=FALSE}
 ggcorrplot::ggcorrplot(cor(df))
 ```
+
 ## Modello
 
 Visualizzo la variabile risposta per vedere se si distribuisce come una normale (condizione necessaria per stimare un modello di regressione lineare)
@@ -88,7 +87,7 @@ Il processo verrà eseguito per ciascuna variabile risposta.
 do.call(anova,modelli[[1]])
 ```
 
-La tabella soprastante si riferisce all'analisi della varianza per la variabile `lcavol`. 
+La tabella soprastante si riferisce all'analisi della varianza per la variabile `lcavol`.
 Osservando il valore $p$ dell statistica F si nota che i due polinomi migliori sono il modello cubico e il modello polinomiale di grado settimo.
 
 Di seguito viene applicata la procedura a tutte le variabili risposta.
@@ -122,6 +121,7 @@ ggplot(df,aes(y = lpsa, x = lcavol)) +
               alpha = 0.1)
 
 ```
+
 ## Grafico dei coefficienti
 
 ```{r}
@@ -131,11 +131,13 @@ arm::coefplot(mod)
 
 ## Funzione a gradino
 
+La funzione a gradini è composta da 4 intervalli, otteremo così 3 variabili dummy più l'intercetta e le relative stime dei loro coefficienti.
+L'intercetta corrisponderà al valore stimato della variabile dipendente quando la variabile indipendente appartiene all'intevallo inferiore.
+Mentre le stime degli altri coefficienti vanno sommate al valore dell'intercetta per ottenere la stima della variabile risposta.
+
 ```{r}
-coef(lm(lpsa ~ cut(lcavol,breaks = c(-1.1,0.2,1.5,2.8,5)), data = df))
+coef(lm(lpsa ~ cut(lcavol,breaks = c(-Inf,0.2,1.5,2.8,Inf)), data = df))
 ```
-
-
 
 ```{r}
 ggplot(df,aes(y = lpsa, x = lcavol)) +
@@ -147,4 +149,45 @@ ggplot(df,aes(y = lpsa, x = lcavol)) +
               alpha = 0.3)
 ```
 
+##Regressione Lasso
 
+Dal grafico delle stime dei coefficienti risulta evidente quali sono state le variabili portate a zero, ovvero le variabili poco influenti sulla variabile risposta.
+
+```{r}
+modLasso = glmnet(makeX(df[, names(df) != "lpsa"]),
+                  df$lpsa,
+                  alpha = 1
+                    # cv.glmnet(makeX(df[, names(df) != "lpsa"]),
+                    #                 df$lpsa,
+                    #                 alpha = 1
+                    #                 )$lambda.1se
+                  )
+coefplot::coefplot(modLasso)
+```
+
+## Regressione locale
+
+Un valore troppo basso di `span` risulta addatarsi troppo ai dati andando incontro a *overfitting.*
+
+```{r}
+modLocale = loess(lpsa ~ lcavol,
+                  data = df,
+                  span = 0.2
+                  )
+ggplot(df,aes(y = lpsa, x = lcavol)) +
+  geom_point() +
+  geom_smooth(method = "loess",
+              formula = y ~ x,
+              span = 0.2,
+              aes(color = "0.2"),
+              fill = "paleturquoise",
+              alpha = 0.3) +
+  geom_smooth(method = "loess",
+              formula = y ~ x,
+              span = 0.6,
+              aes(color = "0.6"),
+              fill = "orchid",
+              alpha = 0.25) + 
+  labs(color = "Span") +
+  scale_color_manual(values = c("0.6" = "orchid", "0.2" = "paleturquoise"))
+```
