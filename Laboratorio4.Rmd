@@ -10,14 +10,18 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(splines)
+library(tidyverse)
 library(mgcv)
 library(ggplot2)
 library(ggformula)
+library(data.table)
+library(broom)
+
 ```
 
-# Prima parte
+## Prima parte: splines_data
 
-## Importo i dati
+### Importo i dati
 
 ```{r}
 sp = read.csv("dataset/splines_data.csv") %>% 
@@ -26,7 +30,7 @@ sp = read.csv("dataset/splines_data.csv") %>%
 colnames(sp) = c("x","y")
 sp
 ```
-
+### Visualizzo i dati
 
 ```{r}
 gg = ggplot(sp,aes(y = y, x = x)) +
@@ -34,18 +38,141 @@ gg = ggplot(sp,aes(y = y, x = x)) +
 gg
 ```
 
+### Stima e raffigurazione di splines
+
 ```{r}
 modNs = lm(y ~ ns(x,df = 8, knots = c(-8,-7,-5,-2,-1,2.5)), data = sp) 
 modNs %>% summary
 ```
+Se con un semplice modello di regressione lineare si ottiene un $R^2_{adj}$ del 0.83%, mentre utilizzando una spline naturale dove sono stati indicati i nodi si ottiene il 0.96%.
 
-
+Nel grafico seguente viene raffigurata la spline stimata nel *chunk* precedente, e in aggiunta una spline cubica con 14 nodi e di conseguenza 18 gradi di libertà.
 ```{r}
 smooth.spline(y = sp$y,x = sp$x,df = 8,nknots = 5)
 gg +
   geom_smooth(method = "lm", 
-              formula = modNs$call[[2]]) +
-  geom_spline(df = 20,nknots = 15)
+              formula = modNs$call[[2]],
+              aes(color = "Splines naturale"),
+              fill = "paleturquoise") +
+  geom_spline(df = 18,
+              nknots = 14,
+              aes(color = "18 GdL e 14 nodi"),
+              size = 1,
+              alpha = 0.7) +
+  labs(color = "Tipologia: ") + 
+  scale_color_manual(values = c("Splines naturale" = "paleturquoise",
+                                "18 GdL e 14 nodi" = "orchid"))
 ```
 
-CERCARE COME INSERIRE SMOOTH.SPLINES IN GEOM_SMOOTH DI GGPLOT
+## Seconda parte
+
+### Generazione dati
+
+Creo una funzione che avrà il compito di generare dei dati da una spline con determinati input.
+
+```{r}
+genSpline <- function(x, knots, degree, theta) {
+
+  basis <- bs(x = x,
+              knots = knots,
+              degree = degree,
+              Boundary.knots = c(0,1),
+              intercept = TRUE)
+
+  ySpline <- basis %*% theta
+
+  dt <- data.table(x, ySpline = as.vector(ySpline))
+
+  return(list(dt = dt, basis = basis, knots = knots))
+}
+```
+
+Ora  genero la spline cubica, prima genero i valori di $x \sim Unif(-1,1)$ e poi da essi genero i valori di y applicando la funzione sopra definita dando in input i valori x appena generati, i $\beta$, i nodi fissati e il grado della spline.
+
+```{r}
+x = runif(150,-1,1)
+knots = c(-0.7, 0, 0.7)
+theta = c(0.7, -0.1, 5, -1.5, 0.1, -0.3, 0.1)
+
+sdata = genSpline(x, knots, 3, theta)
+
+gg = ggplot(sdata$dt, aes(y = ySpline, x = x)) +
+  geom_point()
+gg
+```
+
+### Stima splines
+
+```{r}
+modSplKnots = lm(ySpline ~ bs(x,knots = knots), data = sdata$dt)
+modSplKnots %>%  summary
+```
+
+```{r}
+modSplDf = lm(ySpline ~ bs(x,df = (length(knots)+3)), data = sdata$dt)
+modSplDf %>%  summary
+```
+
+```{r}
+mutate_formula4ggplot = function(grafico, modello)
+{
+  xModificato = str_replace(as.character(modello$call[[2]]),
+                           as.character(grafico$mapping$x[[2]]),
+                           "y")
+  yModificato = str_replace(xModificato,
+                           as.character(grafico$mapping$y[[2]]),
+                           "x")
+  newFormula = sprintf("%s ~ %s", yModificato[2], yModificato[3]) %>%
+    as.formula
+  return(newFormula)
+}
+
+gg +
+  geom_smooth(method = "lm",
+              formula = modSplKnots$call[[2]]) +
+    geom_smooth(method = "lm",
+              formula = modSplDf$call[[2]])
+```
+
+### Spline naturale cubica vs spline di lisciamento
+
+```{r}
+modNsCub = lm(ySpline ~ ns(x,df = 3), data = sdata$dt)
+modNsCub %>% summary
+```
+```{r}
+modSmoothSpline = lapply(c(0,0.5,1),
+                         function(l) smooth.spline(sdata$dt$x,
+                                                   sdata$dt$ySpline,
+                                                   lambda = l)) 
+gg = gg  +
+  geom_smooth(method = "lm",
+              formula = modNsCub$call[[2]]) +
+  geom_smooth(aes(y = modSmoothSpline[[1]]$y, x = modSmoothSpline[[1]]$x),
+              se = T) +
+  geom_smooth(aes(y = modSmoothSpline[[2]]$y, x = modSmoothSpline[[2]]$x),
+              se = T) +
+  geom_smooth(aes(y = modSmoothSpline[[3]]$y, x = modSmoothSpline[[3]]$x),
+              se = T) 
+
+gg
+```
+
+### B-splines
+
+
+## GAM
+
+```{r}
+gg = ggplot(trees, aes(y = Volume))
+gg + geom_point(aes(x = Girth))
+```
+```{r}
+gg + geom_point(aes(x = Height))
+```
+
+
+```{r}
+gam(Volume ~ Girth + Height, data = trees)
+```
+
