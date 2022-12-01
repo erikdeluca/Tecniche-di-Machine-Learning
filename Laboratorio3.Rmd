@@ -76,6 +76,8 @@ names(rDf) = names(dfNumeric)
 rownames(rDf) = c(1:gradoMax)
 rDf
 
+
+
 ```
 
 #### Scelta dei modelli
@@ -149,7 +151,7 @@ ggplot(df,aes(y = lpsa, x = lcavol)) +
               alpha = 0.3)
 ```
 
-##Regressione Lasso
+## Regressione Lasso
 
 Dal grafico delle stime dei coefficienti risulta evidente quali sono state le variabili portate a zero, ovvero le variabili poco influenti sulla variabile risposta.
 

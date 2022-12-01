@@ -16,6 +16,7 @@ library(ggplot2)
 library(ggformula)
 library(data.table)
 library(broom)
+library(purrr)
 
 ```
 
@@ -47,7 +48,7 @@ modNs %>% summary
 Se con un semplice modello di regressione lineare si ottiene un $R^2_{adj}$ del 0.83%, mentre utilizzando una spline naturale dove sono stati indicati i nodi si ottiene il 0.96%.
 
 Nel grafico seguente viene raffigurata la spline stimata nel *chunk* precedente, e in aggiunta una spline cubica con 14 nodi e di conseguenza 18 gradi di libertà.
-```{r}
+```{r,warning=FALSE}
 smooth.spline(y = sp$y,x = sp$x,df = 8,nknots = 5)
 gg +
   geom_smooth(method = "lm", 
@@ -66,7 +67,7 @@ gg +
 
 ## Seconda parte
 
-### Generazione dati
+### Generazione dati con B-splines
 
 Creo una funzione che avrà il compito di generare dei dati da una spline con determinati input.
 
@@ -77,10 +78,12 @@ genSpline <- function(x, knots, degree, theta) {
               knots = knots,
               degree = degree,
               Boundary.knots = c(0,1),
-              intercept = TRUE)
+              intercept = T)
 
   ySpline <- basis %*% theta
 
+  ySpline = ySpline + rnorm(length(x),0,(sd(ySpline)*.1))
+  
   dt <- data.table(x, ySpline = as.vector(ySpline))
 
   return(list(dt = dt, basis = basis, knots = knots))
@@ -103,15 +106,22 @@ gg
 
 ### Stima splines
 
+Di seguito vengono stimate due spline cubiche, nella prima sono fissati i nodi, mentre nella seconda sono fissati i gradi di libertà.
+Come si può osservare l'$R^2_{adj}$ è molto elevato in quanto i dati sono stati generati da una spline cubica con le stesse caratteristiche.
+
 ```{r}
 modSplKnots = lm(ySpline ~ bs(x,knots = knots), data = sdata$dt)
 modSplKnots %>%  summary
 ```
 
 ```{r}
-modSplDf = lm(ySpline ~ bs(x,df = (length(knots)+3)), data = sdata$dt)
+modSplDf = lm(ySpline ~ bs(x,df = (length(knots)+3),intercept = T), data = sdata$dt)
 modSplDf %>%  summary
 ```
+
+Le due spline sono molto simili ma se rappresentate nel grafico con i dati, esse si discostano molto con i dati.
+Questo errore potrebbe essere dato da un utlizzo errato dell'intercetta all'interno della funzione `bs()`.
+Nel successivo capitolo viene stimata nuovamente la spline con una nuova funzione, più specifica e meno generale.
 
 ```{r}
 mutate_formula4ggplot = function(grafico, modello)
@@ -129,12 +139,24 @@ mutate_formula4ggplot = function(grafico, modello)
 
 gg +
   geom_smooth(method = "lm",
+              aes(color = "Nodi fissati"),
+              fill = "paleturquoise",
+              alpha = 0.15,
               formula = modSplKnots$call[[2]]) +
     geom_smooth(method = "lm",
-              formula = modSplDf$call[[2]])
+                aes(color = "GdL fissati"),
+                fill = "orchid",
+                alpha = 0.15,
+              formula = modSplDf$call[[2]]) +
+  labs(color = "Tipologia: ") + 
+  scale_color_manual(values = c("Nodi fissati" = "paleturquoise",
+                                "GdL fissati" = "orchid"))
 ```
 
 ### Spline naturale cubica vs spline di lisciamento
+
+Utilizzando una spline naturale cubica il problema persiste. 
+Invece, utilizzando le spline di lisaciamento, esse si adattano graficamente ai dati.
 
 ```{r}
 modNsCub = lm(ySpline ~ ns(x,df = 3), data = sdata$dt)
@@ -147,19 +169,112 @@ modSmoothSpline = lapply(c(0,0.5,1),
                                                    lambda = l)) 
 gg = gg  +
   geom_smooth(method = "lm",
+              aes(color = "Spline naturale cubica"),
               formula = modNsCub$call[[2]]) +
-  geom_smooth(aes(y = modSmoothSpline[[1]]$y, x = modSmoothSpline[[1]]$x),
+  geom_smooth(aes(y = modSmoothSpline[[1]]$y,
+                  x = modSmoothSpline[[1]]$x,
+                  color = "Lambda = 0"),
               se = T) +
-  geom_smooth(aes(y = modSmoothSpline[[2]]$y, x = modSmoothSpline[[2]]$x),
+  geom_smooth(aes(y = modSmoothSpline[[2]]$y,
+                  x = modSmoothSpline[[2]]$x,
+                  color = "Lambda = 0.5"),
               se = T) +
-  geom_smooth(aes(y = modSmoothSpline[[3]]$y, x = modSmoothSpline[[3]]$x),
-              se = T) 
+  geom_smooth(aes(y = modSmoothSpline[[3]]$y,
+                  x = modSmoothSpline[[3]]$x,
+                  color = "Lambda = 1"),
+              se = T)  +
+  labs(color = "Tipologia: ") + 
+  scale_color_manual(values = c("Spline naturale cubica" = "paleturquoise",
+                                "Lambda 0" = "orchid",
+                                "Lambda 0.5" = "sky blue",
+                                "Lambda 1" = "orange"))
 
 gg
 ```
 
-### B-splines
+## Seconda parte - Nuova versione
 
+La nuova funzione lavora diversamente dalla precedente. 
+In questo caso applica alle $x$ la formula, utilizzando le basi e i nodi dati in input. 
+La funzione è fatta per lavorare solo su spline cubiche ma con un qualsiasi numero di nodi.
+Successivamente viene aggiunta anche la componente aleatoria $\epsilon$. 
+
+```{r}
+generazioneSpline = function(x, knots, theta)
+{
+  gdl = min((length(knots)+4), length(theta))
+  y = theta[1] + 
+    theta[2] * x +
+    theta [3] * x**2 + 
+    theta [4] * x** 3 +
+    transmute(sapply(c(1:length(knots)),
+        function(i) map_dbl(.x = x,
+                            .f = ~ theta [4+i] * (. - knots[i])** 3)) %>% tibble %>% rowwise,
+        y = sum(c_across()))
+
+  y = y$y + rnorm(length(x),0,(sd(y$y)*.1))
+  return(data.frame(x,y))
+}
+df = generazioneSpline(x,knots,theta)
+gg = ggplot(df, aes(x = x, y = y)) +
+  geom_point()
+gg
+```
+
+### Stima splines
+
+Di seguito vengono stimate due spline cubiche, nella prima sono fissati i nodi, mentre nella seconda sono fissati i gradi di libertà.
+Come si può osservare l'$R^2_{adj}$ è molto elevato in quanto i dati sono stati generati da una spline cubica con le stesse caratteristiche.
+
+```{r}
+modSplKnots = lm(y ~ bs(x,knots = knots), data = df)
+modSplKnots %>%  summary
+```
+
+```{r}
+modSplDf = lm(y ~ bs(x,df = (length(knots)+3),intercept = T), data = df)
+modSplDf %>%  summary
+```
+
+Con la nuova funzione per generare i dati, le spline si adattano perfettamente ai dati.
+
+```{r}
+gg +
+  geom_smooth(method = "lm",
+              formula = modSplKnots$call[[2]]) +
+    geom_smooth(method = "lm",
+              formula = modSplDf$call[[2]])
+```
+
+### Spline naturale cubica vs spline di lisciamento
+
+```{r}
+modNsCub = lm(y ~ ns(x,df = 3), data = df)
+modNsCub %>% summary
+```
+
+
+
+```{r,warning=FALSE,error=FALSE}
+modSmoothSpline = lapply(c(0,0.5,1),
+                         function(l) smooth.spline(df$x,
+                                                   df$y,
+                                                   lambda = l)) 
+gg = gg  +
+  geom_smooth(method = "lm",
+              formula = modNsCub$call[[2]]) +
+  geom_smooth(aes(y = modSmoothSpline[[1]]$y, x = modSmoothSpline[[1]]$x),
+              method = "lm",
+              se = T) +
+  geom_smooth(method = "lm",
+              aes(y = modSmoothSpline[[2]]$y, x = modSmoothSpline[[2]]$x),
+              se = T) +
+  geom_smooth(method = "lm",
+              aes(y = modSmoothSpline[[3]]$y, x = modSmoothSpline[[3]]$x),
+              se = T) 
+
+gg
+```
 
 ## GAM
 
@@ -167,12 +282,80 @@ gg
 gg = ggplot(trees, aes(y = Volume))
 gg + geom_point(aes(x = Girth))
 ```
+
 ```{r}
 gg + geom_point(aes(x = Height))
 ```
 
+### Modello di regressione lineare multipla
+
+Provo a fare un semplice modello di regressione lineare multipla e osservo che già così ottengo un buon risultato con $R_{adj}^2$ del 94%.
 
 ```{r}
-gam(Volume ~ Girth + Height, data = trees)
+modGam = list()
+modGam[[1]] = gam(Volume ~ Girth + Height, data = trees)
+modGam[[1]] %>% summary 
+```
+
+### Modello additivo generalizzato con spline
+
+```{r}
+ggplot(trees,(aes(y = Volume, x = Girth,z = Height))) + 
+  geom_point() +
+  geom_smooth(method ="gam",
+              formula = y ~ ns(x,df = 3))
+```
+
+### Modello GAM con interazioni
+
+Osservando il correlogramma si può notare la forte correlazione tra `Volume` e `Girth`, ma allo stesso tempo una forte correlazione tra `Girth` e `Height`.
+
+```{r}
+ggcorrplot::ggcorrplot(corr = cor(trees))
+```
+Provo, allora, a includere la correlazione delle variabili indipendenti. 
+In alternativa si sarebbe potuto ridurre le dimensioni tramite analisi delle componenti principali.
+Il modello è migliorato ulteriormente a quello precedente.
+
+```{r}
+modGam[[2]] = gam(Volume ~ ns(Girth,knots = 1) + ns(Height,df = 3) + ti(Girth,Height) , data = trees)
+modGam[[2]] %>% summary
+# plot.gam(modGam[[2]])
+
+# ggplot(predict.gam(modGam[[2]]), aes(y = f1, x = x2, z = fit)) + geom_raster(fill = fit)
+```
+
+
+
+### Selezione del modello migliore tramite ANOVA
+
+Nella tabella seguente sono rappresentati gli $R_{adj}^2$ di diversi modelli. 
+Le righe corrispondono ai gradi di libertà per la spline della variabile `Height`, mentre per le colonne la variabile `Girth`.
+
+```{r}
+
+gradoMax = 6
+modelli = lapply(X = c(1:gradoMax), function(grGir) lapply(X = c(1:gradoMax),
+                 function(grHei) gam(Volume ~ ns(Girth,df = grGir) + ns(Height,df = grHei) + ti(Girth,Height), data = trees)))
+rDf = map_dfc(c(1:gradoMax),function(grGir) 
+  sapply(c(1:gradoMax),function(grHei) 
+    summary(modelli[[grGir]][[grHei]])$r.sq))
+names(rDf) = paste(c(1:gradoMax),"GdL of Girth")
+rDf
+```
+
+```{r}
+do.call(anova.gam,c(modelli[[1]],test = "F"))
+```
+
+
+Nella tabella seguente è stata applicata l'analisi della varianza (ANOVA), utilizzando la statistica F, ai modelli precedentemente generati. 
+Il modello migliore utilizzando l'ANOVA risulta essere il modello con 1 GdL per la spline della variabile `Girth` e 3 GdL per la variabile `Volume`.
+
+
+```{r}
+anovaDf = map_dfc(c(1:gradoMax),function(var) do.call(anova,c(modelli[[var]], test = "F"))$F)
+names(anovaDf) = paste(c(1:gradoMax),"GdL of Girth")
+anovaDf
 ```
 

@@ -1,0 +1,354 @@
+---
+tipre: "Laboratorio 6"
+author: "Erik De Luca"
+date: "2022-11-25"
+output: 
+  html_document:
+    df_print: "paged"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(tree)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(glmnet)
+library(ggplot2)
+library(randomForest)
+library(gbm)
+```
+
+# Dati TL
+## Importo i dati
+
+Importo i dati e trasformo le variabili `Face` e `Income`.
+
+```{r}
+tl = read.csv("dataset/TL.csv") %>% tibble %>% dplyr::select(-X)
+tl = tl %>% mutate_at(c( "MARSTAT"), as.factor)
+colLog = c("FACE","INCOME")
+tl = tl %>% mutate_at(colLog,log) %>% rename_at(colLog, function(c) paste("L",c,sep = ""))
+tl
+```
+
+Creo una partizione del dataset, l'80% dei dati saranno destinati al training del modello mentre il restante 20% verrà utilizzato per la valutazione del modello creato.
+
+```{r}
+set.seed(1)
+train = createDataPartition(tl$AGE,p = .7,list = F)
+```
+
+
+## Bagging
+
+```{r}
+set.seed(1)
+
+modBagg = randomForest(LFACE ~ .,
+                       data = tl,
+                       subset = train,
+                       mtry = length(tl) - 1,
+                       importance = T)
+modBagg
+```
+
+### Test
+
+Nel grafico si possono osservare come sono distribuiti i residui secondo la variabile risposta del modello.
+Essi non sono distribuiti omogeneamente, il modello sovrastima i dati quando `LFACE` è minore, mentre li sottostima quando tendono a essere sopra la media. 
+
+
+```{r}
+yPred = predict(modBagg, newdata = tl[-train,])
+ggplot(mapping = aes(x = tl$LFACE[-train], y = yPred-tl$LFACE[-train])) +
+  geom_point() +
+  geom_vline(aes(xintercept = mean(tl$LFACE[-train]))) +
+  geom_hline(aes(yintercept = 0)) +
+  xlab("LFACE") +
+  ylab("Residui")
+```
+
+La media quadratica dei residui è pari a 2.76.
+
+```{r}
+mean((yPred-tl$LFACE[-train])**2)
+```
+
+## Random forest
+
+Le variabili da usare durante la creazione di una foresta casuale sono state impostate a 3 mentre prima, nel bagging, venivano considerate tutte e 5.
+In questo caso la varianza spiegata è migliorata di quasi un punto percentuale.
+
+```{r}
+set.seed(1)
+
+modRFor = randomForest(LFACE ~ .,
+                       data = tl,
+                       subset = train,
+                       mtry = 3,
+                       importance = T)
+
+modRFor 
+```
+
+### Test
+
+Anche in questo caso si ripresenta il problema precedente con i residui.
+
+```{r}
+yPred = predict(modRFor, newdata = tl[-train,])
+ggplot(mapping = aes(x = tl$LFACE[-train], y = yPred-tl$LFACE[-train])) +
+  geom_point() +
+  geom_vline(aes(xintercept = mean(tl$LFACE[-train]))) +
+  geom_hline(aes(yintercept = 0)) +
+  xlab("LFACE") +
+  ylab("Residui")
+```
+
+La media quadratica dei residui è pari a 2.61, leggermente minore a quella del bagging, ciò dimostra che il modello random forest  migliore anche durante la *validation* con i dati di test.
+
+```{r}
+mean((yPred-tl$LFACE[-train])**2)
+```
+
+Nel seguente grafico sono riportate le variabili con la misura in percentuale di MSE che diminuisce quando viene inclusa quella variabile e con la misura della diminuzione totale dell'impurità del nodo.
+
+```{r}
+varImpPlot(modRFor)
+```
+
+## Boosting
+
+Per il boosting degli aberi sui dati è stato richiesto di produrre 1000 alberi con una profondità massima di 10.
+
+```{r}
+modBoos = gbm(LFACE ~ .,
+              data = tl,
+              distribution = "gaussian",
+              n.trees = 1000,
+              interaction.depth = 10)
+
+modBoos %>% summary
+```
+
+Nel seguente grafico è presente l'effetto marginale della variabile `LINCOME`.
+
+```{r}
+plot(modBoos, i = "LINCOME")
+```
+
+### Test
+
+Questo grafico è leggermente migliore confronto ai precedenti sulla distribuzione dei residui, inoltre se si osserva la grandezza di misura dell'asse delle ordinate si noterà quanto è diminuita confronto a prima.
+
+```{r}
+yPred = predict(modBoos, newdata = tl[-train,])
+ggplot(mapping = aes(x = tl$LFACE[-train], y = yPred-tl$LFACE[-train])) +
+  geom_point() +
+  geom_vline(aes(xintercept = mean(tl$LFACE[-train]))) +
+  geom_hline(aes(yintercept = 0)) +
+  xlab("LFACE") +
+  ylab("Residui")
+```
+
+La media quadratica dei residui è pari a 0.10, all'incirca il 4% del MSE del modello random forest.
+Il boosting si rivela, in questo caso, il metodo migliore.
+
+```{r}
+mean((yPred-tl$LFACE[-train])**2)
+```
+
+
+# Dati prostata
+## Importo i dati
+
+```{r}
+pr = read.csv("dataset/prostate.csv") %>% 
+  as_tibble %>% dplyr::select(-X)
+pr$svi = pr$svi %>% as.logical()
+pr
+```
+
+Creo una partizione del dataset, l'80% dei dati saranno destinati al training del modello mentre il restante 20% verrà utilizzato per la valutazione del modello creato.
+
+```{r}
+set.seed(1)
+train = createDataPartition(pr$lcavol,p = .7,list = F)
+```
+
+
+## Bagging
+
+```{r}
+set.seed(1)
+
+modBagg = randomForest(lpsa ~ .,
+                       data = pr,
+                       subset = train,
+                       mtry = length(pr) - 1,
+                       importance = T)
+modBagg
+```
+
+### Test
+
+Nel grafico si possono osservare come sono distribuiti i residui secondo la variabile risposta del modello.
+
+```{r}
+yPred = predict(modBagg, newdata = pr[-train,])
+ggplot(mapping = aes(x = pr$lpsa[-train], y = yPred-pr$lpsa[-train])) +
+  geom_point() +
+  geom_vline(aes(xintercept = mean(pr$lpsa[-train]))) +
+  geom_hline(aes(yintercept = 0)) +
+  xlab("lpsa") +
+  ylab("Residui")
+```
+
+La media quadratica dei residui è pari a 0.177.
+
+```{r}
+mean((yPred-pr$lpsa[-train])**2)
+```
+
+## Random forest
+
+Le variabili da usare durante la creazione di una foresta casuale sono state impostate a 4, provando dove con 4 si ottiene un modello più performante che con le altre opzioni.
+
+```{r}
+set.seed(1)
+
+modRFor = randomForest(lpsa ~ .,
+                       data = pr,
+                       subset = train,
+                       mtry = 4,
+                       importance = T)
+
+modRFor
+```
+
+### Test
+
+```{r}
+yPred = predict(modRFor, newdata = pr[-train,])
+ggplot(mapping = aes(x = pr$lpsa[-train], y = yPred-pr$lpsa[-train])) +
+  geom_point() +
+  geom_vline(aes(xintercept = mean(pr$lpsa[-train]))) +
+  geom_hline(aes(yintercept = 0)) +
+  xlab("lpsa") +
+  ylab("Residui")
+```
+
+La media quadratica dei residui è pari a 0.198, più alta del 12% rispetto al bagging.
+
+```{r}
+mean((yPred-pr$lpsa[-train])**2)
+```
+
+Nel seguente grafico sono riportate le variabili con la misura in percentuale di MSE che diminuisce quando viene inclusa quella variabile e con la misura della diminuzione totale dell'impurità del nodo.
+
+```{r}
+varImpPlot(modRFor)
+```
+
+## Boosting
+
+Per il boosting degli aberi sui dati è stato richiesto di produrre 1000 alberi con una profondità massima di 10.
+
+```{r}
+modBoos = gbm(lpsa ~ .,
+              data = pr %>% mutate_if(is.logical, as.factor),
+              distribution = "gaussian",
+              n.trees = 1000,
+              interaction.depth = 10)
+
+modBoos %>% summary
+```
+
+Nel seguente grafico è presente l'effetto marginale della variabile `lcavol`.
+
+```{r}
+plot(modBoos, i = "lcavol")
+```
+
+### Test
+
+
+```{r}
+yPred = predict(modBoos, newdata = pr[-train,])
+ggplot(mapping = aes(x = pr$lpsa[-train], y = yPred-pr$lpsa[-train])) +
+  geom_point() +
+  geom_vline(aes(xintercept = mean(pr$lpsa[-train]))) +
+  geom_hline(aes(yintercept = 0)) +
+  xlab("lpsa") +
+  ylab("Residui")
+```
+
+La media quadratica dei residui è pari a 0.015, all'incirca l'8% del MSE del modello bagging.
+Anche in questo caso il boosting si rivela il metodo migliore.
+
+```{r}
+mean((yPred-pr$lpsa[-train])**2)
+```
+
+## Caret
+
+Ripeto la creazione del modello random forest, questa volta tramite la libreria caret.
+
+```{r}
+set.seed(1)
+modCaret = train(lpsa ~ .,
+                 data = pr,
+                 method = "rf",
+                 importance = T,
+                 trControl = trainControl("oob")
+                 )
+modCaret 
+```
+
+
+```{r}
+yPred = predict(modCaret, newdata = pr[-train,])
+ggplot(mapping = aes(x = pr$lpsa[-train], y = yPred-pr$lpsa[-train])) +
+  geom_point() +
+  geom_vline(aes(xintercept = mean(pr$lpsa[-train]))) +
+  geom_hline(aes(yintercept = 0)) +
+  xlab("lpsa") +
+  ylab("Residui")
+```
+### Test
+
+La media quadratica dei residui è pari a 0.107, il 45% più bassa rispetto l'utilizzo della libreria randomForest.
+
+```{r}
+mean((yPred-pr$lpsa[-train])**2)
+```
+### Controllo dei parametri
+
+Ora ripeto la procedura ma questa volta alcuni parametri li cambio: `mtry` corrisponde al numero di variabili casuali che il modello potrà scegliere a ogni nodo tra quelle disponibili, in `trainControlo` `number` sta per il numero di *fold* nella quale dovrà suddividere i dati e `repeats` è il numero di *fold* completi da ripetere. 
+
+```{r}
+set.seed(1)
+modCaretNew = train(lpsa~., 
+                    data = pr, 
+                    method = 'rf', 
+                    metric = 'RMSE',
+                    importance = T,
+                    tuneGrid = expand.grid(.mtry = 7), #round(sqrt(ncol(pr)))), 
+                    trControl = trainControl(method = 'repeatedcv',
+                                             number = 10, 
+                                             repeats = 3))
+modCaretNew
+
+```
+
+
+La media quadratica dei residui è pari a 0.097, il 10% più bassa rispetto al precedente modello.
+
+```{r}
+yPred = predict(modCaretNew, newdata = pr[-train,])
+mean((yPred-pr$lpsa[-train])**2)
+```
+

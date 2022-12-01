@@ -1,0 +1,107 @@
+---
+title: "Laboratorio 7"
+author: "Erik De Luca"
+date: "2022-11-29"
+output: 
+  html_document:
+    df_print: "paged"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(mlbench)
+```
+
+
+## Importo i dati
+
+```{r}
+cr = read.table("C:/Users/Erik/OneDrive - Università degli Studi di Trieste/Dati/crediti.txt",header = T) %>% tibble
+cr = cr %>% mutate_at(c("y","acc","moral","intuse"),as.factor)
+levels(cr$intuse) = c("lavoro","fini privati")
+levels(cr$moral) = c("bad", "good")
+levels(cr$y) = c("solvente", "insovente")
+cr
+```
+
+```{r}
+mod1 = glm(y ~ ., data = cr, family = binomial(link = logit))
+summary(mod1)
+```
+
+```{r}
+mod2 = glm(y ~ acc + poly(duration,2) + poly(amount,2) + moral + intuse,
+           data = cr,
+           family = binomial(link = logit))
+summary(mod2)
+
+```
+Confronto i due modelli attraverso l'analisi della devianza.
+Faccio la differenza della devianza dei due modelli e vedo inserisco il valoro in una chi quadrato con i gradi di libertà pari alla differenza dei GdL tra i due modelli.
+
+```{r}
+1 - pchisq(mod1$deviance-mod2$deviance,
+           mod1$df.residual-mod2$df.residual)
+```
+
+Ipotizzo che arrivi un nuovo cliente e applichi l'ultimo modello
+
+```{r}
+mio = with(cr, data.frame(
+  acc = "no",
+  duration = 36,
+  durationsq = 36 ^ 2,
+  amount = 10,
+  amountsq = 100,
+  moral = "bad",
+  intuse = "fini privati"
+  )
+)
+predict(mod2, newdata = mio, type = "response")
+```
+
+Divido il dataset in train e test
+
+```{r}
+set.seed(1234)
+train = sample_n(cr, dim(cr)[1]*.7)
+test = setdiff(cr, train)
+
+modFull = glm(y ~ .,
+              data = train,
+              family = binomial)
+
+probabilities = predict(modFull,
+                        newdata = test,
+                        type = "response")
+
+hist(probabilities)
+table(probabilities>0.5)
+previsto = factor(probabilities>0.5,
+                  levels = c(F, T),
+                  labels = c("solvente", "insolvente"),
+                  ordered = T)
+
+osservato = test$y
+conf = table(previsto,osservato)
+conf
+```
+
+
+
+## Dati sugli indiani
+
+```{r}
+df = PimaIndiansDiabetes2 %>% tibble
+df
+```
+
+data wrangling
+
+
+```{r}
+
+```
+
+

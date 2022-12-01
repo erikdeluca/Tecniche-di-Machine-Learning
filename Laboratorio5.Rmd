@@ -1,0 +1,310 @@
+---
+title: "Laboratorio 5"
+author: "Erik De Luca"
+date: "2022-11-17"
+output: 
+  html_document:
+    df_print: "paged"
+---
+
+```{r setup, include=F,warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(tree)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(glmnet)
+library(ggplot2)
+library(coefplot)
+library(earth)
+```
+
+Importo i dati e trasformo le variabili `Face` e `Income`.
+
+```{r}
+tl = read.csv("dataset/TL.csv") %>% tibble %>% select(-X)
+tl = tl %>% mutate_at(c( "MARSTAT"), as.factor)
+colLog = c("FACE","INCOME")
+tl = tl %>% mutate_at(colLog,log) %>% rename_at(colLog, function(c) paste("L",c,sep = ""))
+tl
+```
+
+Creo una partizione del dataset, l'80% dei dati saranno destinati al training del modello mentre il restante 20% verrà utilizzato per la valutazione del modello creato.
+
+```{r}
+set.seed(1)
+train = createDataPartition(tl$AGE,p = .7,list = F)
+```
+
+## Albero 
+
+Nella raffigurazione dell'albero si nota come la variabile più influente e importe è `LINCOME`, seguita da `AGE`.
+Essa, infatti, non è solo quella che compare sul primo nodo ma è anche la più utilizzata nei nodi.
+
+I nodi terminali sono 10 e sono stati scelti automaticamente dalla funzione `tree`. 
+In alternativa, potevano essere dati in input il numero di nodi foglia desiderati, da un minimo di 1 (soluzione banale), fino ad un massimo di $n$ nodi foglia dove $n$ è il numero di osservazioni utlizzate per allenare il modello.
+Ovviamente entrambe le solouzioni non vanno bene, la prima perché non generebbe nessun risultato utile in quanto tutte le osservazioni del dataset apprterebbero alla medesima regione dello spazio in cui si è divisa la partizione dei dati.
+Nel secondo caso si andrebbe incontro all'*overfitting* massimo.
+
+```{r}
+albero = tree(LFACE ~ ., data = tl[train,])
+{
+  plot(albero)
+  text(albero, cex = 0.7)
+}
+```
+
+
+
+### Confronto l'albero con altri modelli
+
+#### Regressione lineare multipla
+
+Per scegliere il modello migliore di regressione lineare utilizzo il criterio dell'informazione di Akaike (AIC), che va penalizzare i modelli con troppe variabili e poche informazioni aggiuntive, come $R_{adj}^2$.
+Tramite la funzione `stepAIC` andiamo a selezionare il modello con il minore AIC.
+
+```{r}
+modLm = MASS::stepAIC(lm(LFACE ~ ., data = tl[train,]))
+modLm %>% summary
+```
+
+
+#### Lasso
+
+
+```{r}
+
+modLasso = glmnet(x = makeX(tl[train,names(tl)!= "LFACE"]),
+                  y = tl$LFACE[train],
+                  alpha = 1)
+cvModLasso = cv.glmnet(makeX(tl[train,names(tl)!= "LFACE"]),
+                       tl$LFACE[train],
+                       alpha = 1) 
+{
+  plot(cvModLasso)
+  abline(v = log(cvModLasso$lambda.min), col = "blue", lty = 2)
+}
+```
+
+
+```{r}
+modLasso = glmnet(x = makeX(tl[train,names(tl)!= "LFACE"]),
+                  y = tl$LFACE[train],
+                  alpha = 1,
+                  lambda = cvModLasso$lambda.min,
+                  standardize = TRUE,
+                  family = "gaussian")
+coefplot(modLasso)
+```
+
+```{r}
+coef.glmnet(modLasso, s = cvModLasso$lambda.min)
+```
+
+#### Ridge
+
+```{r}
+
+modRidge = glmnet(x = makeX(tl[train,names(tl)!= "LFACE"]),
+                  y = tl$LFACE[train],
+                  alpha = 0)
+cvModRidge = cv.glmnet(makeX(tl[train,names(tl)!= "LFACE"]),
+                       tl$LFACE[train],
+                       alpha = 0) 
+{
+  plot(cvModRidge)
+  abline(v = log(cvModRidge$lambda.min), col = "blue", lty = 2)
+}
+```
+
+
+```{r}
+modRidge = glmnet(x = makeX(tl[train,names(tl)!= "LFACE"]),
+                  y = tl$LFACE[train],
+                  alpha = 0,
+                  lambda = cvModRidge$lambda.min,
+                  standardize = TRUE,
+                  family = "gaussian")
+coefplot(modRidge)
+```
+
+### Confronto modelli
+
+Come deducibile la variabile `LINCOME` è la più influente su tutti gli modelli. 
+Interessante notare come i modelli ridge e lasso contengano la variabile `MARSTAT` mentre il modello di regressione lineare no, oltretutto il coefficiente è elvato ma giustificatodal fatto che la variabile può assumere solo valori 0 e 1.
+
+
+## Potatura
+
+Produco un albero di regressione e stampo il grafico delle variabili più influenti nel modello.
+
+```{r}
+alberoRpart = rpart::rpart(LFACE ~ .,
+                      data = tl,
+                      subset = train,
+                      method = "anova",
+                      control = rpart.control(minsplit = 10, cp = 0.003))
+vip::vip(alberoRpart)
+```
+Di seguito viene raffigurato il grafico ad albero con un elevato numero di nodi.
+Successivamente è presente un grafico rappresentate l'errore relativo dell'albero al variare del cp (*cost complexity pruning*) e si noti come inizialmente la curva decresce per poi tornare a crescere.
+
+
+```{r}
+rpart.plot(alberoRpart)
+```
+
+
+
+```{r}
+{
+  plotcp(alberoRpart)
+  points(x = which.min(alberoRpart$cptable[,"xerror"]),
+         y = min(alberoRpart$cptable[,"xerror"]),
+         col = "red",
+         pch = 18)
+}
+```
+
+Il cp ottimale risulta essere 0.025.
+Stampo, allora, il nuovo albero potato. 
+In questo caso l'albero avrà solamente 4 nodi foglia e verranno utilizzate 2 variabili.
+
+```{r}
+rpart.plot(rpart(LFACE ~ .,
+                      data = tl,
+                      subset = train,
+                      method = "anova",
+                      control = rpart.control(cp = alberoRpart$cptable[which.min(alberoRpart$cptable[,"xerror"]),"CP"])))
+```
+
+
+### Potatura tramite cross-validation
+
+Ora eseguo la stessa operazione ma utilizzando la cross-validation come metodo per potare l'albero.
+
+```{r}
+set.seed(1)
+alberoTree = tree(LFACE ~ .,
+                  data = tl,
+                  subset = train,
+                  control = tree.control(nobs = length(train),
+                                         minsize = 5))
+
+cvAlbero = cv.tree(alberoTree)
+
+cv = data.frame(size = cvAlbero$size, dev = cvAlbero$dev)
+
+ggplot(cv, mapping = aes(x = size,y = dev), size = 10) +
+  geom_line() + 
+  geom_vline(mapping = aes(xintercept = which.min(dev)), color = "red", linetype = 2)
+```
+
+L'albero migliore risulta essere quello con 10 nodi terminali.
+
+```{r}
+alberoPotato = prune.tree(alberoTree, best = which.min(cv$dev))
+
+{
+  plot(alberoPotato)
+  text(alberoPotato)
+}
+```
+
+## MSE
+
+```{r}
+set.seed(1)
+
+calcolaMSE = function(nodiFinali, dati, varDipendente, subsTrain, subsTest)
+{
+  t = prune.tree(tree(get(varDipendente) ~ .,
+                      data = dati,
+                      subset = subsTrain,
+                      control = tree.control(nobs = length(subsTrain),minsize = nodiFinali)),
+                 best = nodiFinali)
+  return(sqrt(mean((unlist(dati[subsTest,colnames(dati) == varDipendente] - predict(t,newdata = dati[subsTest,])))^2)))
+}
+
+mseTrain = sapply(c(2:10), function(X) calcolaMSE(X,dati = tl,varDipendente = "LFACE",subsTrain = train, subsTest = train))
+
+mseTest = sapply(c(2:10), function(X) calcolaMSE(X,dati = tl,varDipendente = "LFACE",subsTrain = c(1:length(tl$AGE))[-train], subsTest = c(1:length(tl$AGE))[-train]))
+
+mseCV = sapply(c(2:10), function(X) calcolaMSE(X,dati = tl,varDipendente = "LFACE",subsTrain = c(1:length(tl$AGE))[train], subsTest = c(1:length(tl$AGE))[-train]))
+
+```
+
+Nel grafico seguente sono rappresentati gli errori quadratici medi sugli alberi con diversi nodi e diversi dati.
+La curva *train* corrisponde ai modelli addestrati sui  dati train e validati con i medesimi dati, infatti è la curva con l'MSE minore delle altre. 
+La curva *test*, invece, corrisponde ai modelli addesstrati sui dati test e validati con i medesimi dati, questa curva è molto simile alla precedente ma tende a essere maggiore in alcuni punti in quanto la dimensione del dataset test è minore di quella del dataset train.
+La curva *CV*, corrisponde ai modelli addestrati con i dati train ma validati sui dati test, essa risulta essere la più alta ma anche la più veritiera (meno distorta).
+
+
+```{r}
+df = tibble(nodi = c(2:10),mseTrain,mseTest,mseCV) %>% na.omit()
+
+ggplot(df,mapping = aes(x = nodi)) +
+  geom_line(aes(y = mseTrain,
+                color = "Train")) +
+  geom_line(aes(y = mseTest,
+                color = "Test")) +
+  geom_line(aes(y = mseCV,
+                color = "CV")) +
+  labs(y = "MSE", x = "Nodi",color = "Legenda") 
+  
+
+```
+
+
+## MARS
+
+Stimo un primo modello MARS.
+
+```{r}
+modMars = earth(LFACE ~ ., data = tl, nprune = 7, degree = 1)
+modMars %>% summary
+```
+
+```{r}
+plot(modMars)
+```
+
+Provo a vedere se includendo delle interazioni migliori il modello.
+Il miglior modello, secondo $R^2$, è il modello con 3 gradi d'interazione.
+
+```{r}
+gradi = which.max(sapply(c(1:5), function(d) earth(LFACE ~ ., data = tl, nprune = 7, degree = d) %>% summary %>% .$rsq))
+modMars = earth(LFACE ~ ., data = tl, nprune = 7, degree = gradi)
+modMars %>% summary
+```
+
+La variabile `AGE` non viene utilzzita, mentre vengono considerate alcune interazioni tra le variabili `EDUCATION` e `LINCOME`.
+
+```{r}
+vip::vip(modMars)
+```
+
+# Caret
+
+```{r}
+modCarBoos = caret::train(
+  LFACE ~ .,
+  data = tl,
+  trControl = trainControl(method = "boot"),
+  na.action = na.pass)
+modCarBoos
+```
+
+```{r}
+modCarRF = caret::train(
+  LFACE ~ .,
+  data = tl,
+  method  = "rf",
+  na.action = na.pass)
+modCarRF
+
+```
+
