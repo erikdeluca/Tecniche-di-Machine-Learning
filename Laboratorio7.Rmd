@@ -11,97 +11,556 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 library(dplyr)
 library(mlbench)
+library(caret)
+library(naniar)
+library(mgcv)
+library(rpart)
+library(splines)
+library(rpart.plot)
 ```
 
-
-## Importo i dati
-
-```{r}
-cr = read.table("C:/Users/Erik/OneDrive - Università degli Studi di Trieste/Dati/crediti.txt",header = T) %>% tibble
-cr = cr %>% mutate_at(c("y","acc","moral","intuse"),as.factor)
-levels(cr$intuse) = c("lavoro","fini privati")
-levels(cr$moral) = c("bad", "good")
-levels(cr$y) = c("solvente", "insovente")
-cr
-```
-
-```{r}
-mod1 = glm(y ~ ., data = cr, family = binomial(link = logit))
-summary(mod1)
-```
-
-```{r}
-mod2 = glm(y ~ acc + poly(duration,2) + poly(amount,2) + moral + intuse,
-           data = cr,
-           family = binomial(link = logit))
-summary(mod2)
-
-```
-Confronto i due modelli attraverso l'analisi della devianza.
-Faccio la differenza della devianza dei due modelli e vedo inserisco il valoro in una chi quadrato con i gradi di libertà pari alla differenza dei GdL tra i due modelli.
-
-```{r}
-1 - pchisq(mod1$deviance-mod2$deviance,
-           mod1$df.residual-mod2$df.residual)
-```
-
-Ipotizzo che arrivi un nuovo cliente e applichi l'ultimo modello
-
-```{r}
-mio = with(cr, data.frame(
-  acc = "no",
-  duration = 36,
-  durationsq = 36 ^ 2,
-  amount = 10,
-  amountsq = 100,
-  moral = "bad",
-  intuse = "fini privati"
-  )
-)
-predict(mod2, newdata = mio, type = "response")
-```
-
-Divido il dataset in train e test
-
-```{r}
-set.seed(1234)
-train = sample_n(cr, dim(cr)[1]*.7)
-test = setdiff(cr, train)
-
-modFull = glm(y ~ .,
-              data = train,
-              family = binomial)
-
-probabilities = predict(modFull,
-                        newdata = test,
-                        type = "response")
-
-hist(probabilities)
-table(probabilities>0.5)
-previsto = factor(probabilities>0.5,
-                  levels = c(F, T),
-                  labels = c("solvente", "insolvente"),
-                  ordered = T)
-
-osservato = test$y
-conf = table(previsto,osservato)
-conf
-```
-
-
+# Esercizio 1
 
 ## Dati sugli indiani
 
 ```{r}
+data(PimaIndiansDiabetes2)
 df = PimaIndiansDiabetes2 %>% tibble
 df
 ```
 
-data wrangling
+
+Analizzo quali sono le colonne con più valori mancanti(`NA`). 
+
+```{r}
+DataExplorer::plot_missing(df)
+```
+
+Provo a vedere anche quali sono le variabili più correlate per capire se sia necessario conservare o meno insulin e triceps.
 
 
 ```{r}
+DataExplorer::plot_correlation(df %>% na.omit)
+```
+
+```{r}
+scoreNA = sapply(1:ncol(df),function(c) sum(is.na(df[,c])))
+names(scoreNA) = names(df)
+scoreNA
+```
+
+
+Un altro metodo può essere quello di costruire diversi GLM ma con diversi parametri inclusi e allo stesso tempo diversi dati, in quanto quando includo alcuni parametri non potrò usare i dati che non possiedono i valori per quei determinati parametri.
+Questa procedura risulta essere però, molto laboriosa.
+
+Si procede allora alla creazione di una funzione, che come `stepAIC` della libreria `MASS` in versione *backward*, parte da un modello contenente tutte le variabili e successivamente rimuove quelle con più NA.
+La funzione creata è stata generalizzata per lavorare su diversi modelli, non solo GLM, ma anche LM e GAM.
+Ha, tuttavia, molte limitazioni, come l'incapacità d inserire splines, polinomiali e simili sulle variabili indipendenti.
+Un'altra limitazione è la mancanza di un partizionamento dei dati e successivamente di un metodo di validazione del modello.
+
+Infine, eseguendo la funzione, il modello migliore secondo il criterio d'informazione di Akaike risulta essere il primo, ovvero il modello completo.
+
+```{r}
+eliminaVariabiliNA = function(funzioneModello = glm,
+                              variabileRisposta,
+                              dataframe,
+                              famiglia,
+                              variabiliFunzione = new.env(),
+                              modelli = new.env())
+{
+  if(length(variabiliFunzione$passo) == 0) # passo 0
+  {
+    variabiliFunzione$passo = 0
+    
+    # costruisco una tabella con il numero di NA per ciascua variabile indipendente
+    colonne = c(1:ncol(dataframe))[names(dataframe) != variabileRisposta]
+    variabiliFunzione$scoreNA = sapply(colonne,function(c) sum(is.na(dataframe[,c])))
+    names(variabiliFunzione$scoreNA) = names(dataframe)[names(dataframe)!=variabileRisposta]
+    
+    # definisco gli argomenti da inserire all'interno della funzione in base a ciò che ho in input, nel lm non serve la famiglia
+    if(length(famiglia)>0) 
+    {
+      variabiliFunzione$argomenti = list(formula = as.formula(paste(variabileRisposta," ~ .")),
+                                         data = dataframe, 
+                                         family = famiglia)
+    }else
+    {
+      variabiliFunzione$argomenti = list(formula = as.formula(paste(variabileRisposta," ~ .")),
+                                         data = dataframe)
+    }
+      
+    modello =  do.call(funzioneModello,list(formula = as.formula(paste(variabileRisposta," ~ .")),
+                                         data = dataframe,
+                                         family = binomial(link = logit)))
+  }else # passo N
+  {
+    variabiliFunzione$argomenti$formula = modelli$formula[[variabiliFunzione$passo]]
+    # rimuovo la variabile con più NA presente nel modello precedente
+    modello = update(object = do.call(funzioneModello, variabiliFunzione$argomenti),
+                     sprintf(". ~ . - %s",
+                             deparse(as.name(names(sort(scoreNA, T)[variabiliFunzione$passo])))))
+  }
+  
+  # incapsulo le informazioni più interessanti del modello
+    modelli$AIC = append(modelli$AIC,modello$aic)
+    modelli$coefficients = append(modelli$coefficients,modello$coefficients)
+    modelli$formula = append(modelli$formula,modello$formula)
+    modelli$deviance = append(modelli$deviance,modello$deviance)
+    
+    variabiliFunzione$passo = variabiliFunzione$passo + 1
+    
+    if(variabiliFunzione$passo < length(variabiliFunzione$scoreNA))
+    {
+      return(eliminaVariabiliNA(funzioneModello, 
+                                variabileRisposta, 
+                                dataframe, 
+                                famiglia, 
+                                variabiliFunzione, 
+                                modelli)) # ricorsività (richiamo del passo N+1)
+    }else
+    {
+      return(modelli)
+    }
+}
+
+modGlmNa = eliminaVariabiliNA(glm,"diabetes",df,binomial(logit))
+
+modGlmNa$AIC
+```
+### Idea
+
+Un'idea per ottenere un modello più performante disponibile potrebbe essere quella di generare diversi modelli con diverse variabili dipendenti e in base alla variabile risposta da predire si sceglierà il modello con le features della variabile risposta.
+
+
+## Riempimento NA mancanti
+
+Essendo che il modello scelto possiede molti NA conviene fare un riempimento dei NA ove possibile.
+Prima di fare ciò osservo come sono distribuiti i NA nelle singole osseervazioni tra le variabili.
+Noto che in quasi tutti i casi i NA sono "nidificati tra le variabili", ovvero che se `pressure` mancherà, allora di conseguenza mancheranno anche `insuline` e `triceps`.
+
+```{r,warning=FALSE}
+vis_miss(df, sort_miss = T, cluster = T)
+```
+
+Questa tabella aiuta a vedere le correlazioni tra le variabili e che tipo di modello sarebbe più adatto stimare.
+
+```{r,warning=FALSE}
+PerformanceAnalytics::chart.Correlation(df %>% mutate_at("diabetes",as.numeric))
+```
+
+Il grafico sopra raffigura le correlazzioni tra variabili, le loro distribuzioni e le loro distribuzioini in funzione delle altre variabili.
+
+#### Glucose
+
+Partendo dalla variabile `glucose`, l'obbiettivo è quello di riempire i NA in base ai dati che abbiamo. 
+Si nota che `glucose` è correlata con tutte le altre variabili, quindi presumibilmente il modello conterrà tutte le altre variabili. 
+C'è anche multicollinearità, ma nessuna collinearità esatta, quindi sarebbe opportuno anche inserire la correlazione tra le variabili esplicative.
+L'obbiettivo è la previsione, più accurata possibile, degli NA e non l'interpretabilità del modello, infatti inserendo l'interazione il modello avrà molti stimatori in più.
+Per semplicità, è stato scelto un modello di regressione lineare.
+
+```{r}
+varDip = "glucose"
+colonne = names(df)[names(df) != varDip]
+modGlu = lm(as.formula(paste(varDip," ~ ",paste(colonne,collapse = " * "))), data = df)
+modGlu %>% summary
+```
+
+Come si può osservare il modello non è interpretabile ma garantisceun buon $R^2_{adj}$. 
+Eseguendo un modello senza interazioni si otterebbe un $R^2_{adj}$ del 47% contro il 70% di quello con interazioni.
+Anche seguendo il criterio dell'informazione di Akaike scegliamo il modello con interazioni.
+Interessante anche notare come la differenza tra $R^2_{adj}$ e $R^2$ nel modello con interazioni, in quanto contiene molti più parametri confronto il modello con interazioni, dove la differenza è nettamente minore.
+
+```{r}
+modGluSemplice = lm(as.formula(paste(varDip, " ~ ",paste(colonne,collapse = " + "))), df)
+data.frame(R2 = c(summary(modGlu)$r.squared, summary(modGluSemplice)$r.squared),
+           R2adj = c(summary(modGlu)$adj.r.squared, summary(modGluSemplice)$adj.r.squared),
+           AIC = c(AIC(modGlu), AIC(modGluSemplice)),
+           row.names = c("Con interazioni", "Senza interazioni"))
+```
+
+Nel modello conviene non includere le variabili le quali hanno degli NA sia nella suddetta variabile, sia nella variabile risposta.
+Un'altra opzione è quella di costruire modelli ad hoc in base alle informazioni disponibili sull'osservazione con NA nella variabile  risposta.
+
+```{r}
+righeNA = is.na(df$glucose)
+df[righeNA,]
+```
+
+
+```{r}
+colonne = names(df)[!sapply(1:ncol(df), function(c) sum(is.na(df[,varDip]) & is.na(df[,c]))>0)]
+# seleziona le righe con almeno un NA oltre la variabile dipendente e su di esse applica un modello senza le colonne le quali contengono NA nella stessa osservazione con NA sulla variabile dipendente
+righe = sapply(1:nrow(df), function(r) sum(sapply(1:ncol(df), function(c) is.na(df[,varDip]) & is.na(df[,c]))[r,]))>1 
+df[righe,varDip] = predict(lm(as.formula(paste(varDip, " ~ ",paste(colonne,collapse = " + "))), df),
+                     newdata = df[righe,])
+
+# modello completo
+righe = sapply(1:nrow(df), function(r) sum(sapply(1:ncol(df), function(c) is.na(df[,varDip]) & is.na(df[,c]))[r,])) == 1
+df[righe,varDip] = predict(modGlu, newdata = df[righe,])
+df[righeNA,]
+```
+
+#### Mass
+
+Ora ripeto la procedura con la variabile `Mass`.
+
+```{r,echo=FALSE}
+varDip = "mass"
+colonne = names(df)[names(df) != varDip]
+modMass = MASS::stepAIC(lm(as.formula(paste(varDip," ~ ",paste(colonne,collapse = " * "))), data = df))
+```
+
+```{r}
+summary(modMass)$adj.r.squared
+```
+
+##### Classificazione NA
+
+Il problema è  che bisogna fare diversi modelli per i diversi casi di NA nelle altree variabili, procedo allora con una iniziale classificazione
+
+```{r}
+naDf = as.data.frame(sapply(1:ncol(df),
+                            function(c) is.na(df[,varDip]) & is.na(df[,c])))
+names(naDf) = names(df)
+# seleziono le colonne con almeno un NA
+naDf = naDf[,sapply(1:ncol(naDf), function(c) sum(naDf[,c])>0)]
+ftable(xtabs(mass ~ ., naDf))
+```
+I modelli da costruire saranno 4..
+Il codice di seguito prende un'osservazione NA, costruisce un modello escludendo altre variabili NA nella stessa osservazione e successivamente, attraverso il modello, predice il valora della variabile NA e lo sostituisce.
+Ovviamente non lo fa solo alla singola osservazione ma a tutte le osservazioni che si troveranno nella medesima situazione.
+
+```{r, echo=F}
+# creo processo iterativo
+while(anyNA(df[,varDip]))
+{
+# indice colonne na
+indiceColonne = where_na(df[which(is.na(df[,varDip]))[1],])[,2]
+colonne = names(df)[-indiceColonne]
+modMass = MASS::stepAIC(lm(as.formula(paste(varDip," ~ ",paste(colonne,collapse = " * "))), data = df))
+
+righe = sapply(1:nrow(df),
+               function(r) sum(sapply(1:ncol(df),
+                                      function(c) is.na(df[r,c]))) == length(indiceColonne)) & is.na(df[,varDip])
+df[righe,varDip] = predict(modMass, newdata = df[righe,])
+}
 
 ```
 
+#### Pressure
+
+```{r,echo=FALSE}
+varDip = "pressure"
+colonne = names(df)[names(df) != varDip]
+modMass = MASS::stepAIC(lm(as.formula(paste(varDip," ~ ",paste(colonne,collapse = " * "))), data = df))
+```
+
+```{r}
+naDf = as.data.frame(sapply(1:ncol(df),
+                            function(c) is.na(df[,varDip]) & is.na(df[,c])))
+names(naDf) = names(df)
+# seleziono le colonne con almeno un NA
+naDf = naDf[,sapply(1:ncol(naDf), function(c) sum(naDf[,c])>0)]
+ftable(xtabs(get(varDip) ~ ., naDf))
+```
+
+```{r, echo=F}
+# creo processo iterativo
+while(anyNA(df[,varDip]))
+{
+# indice colonne na
+indiceColonne = where_na(df[which(is.na(df[,varDip]))[1],])[,2]
+colonne = names(df)[-indiceColonne]
+modMass = MASS::stepAIC(lm(as.formula(paste(varDip," ~ ",paste(colonne,collapse = " * "))), data = df))
+
+righe = sapply(1:nrow(df),
+               function(r) sum(sapply(1:ncol(df),
+                                      function(c) is.na(df[r,c]))) == length(indiceColonne)) & is.na(df[,varDip])
+df[righe,varDip] = predict(modMass, newdata = df[righe,])
+}
+
+```
+
+#### Triceps
+
+```{r,echo=FALSE}
+varDip = "triceps"
+colonne = names(df)[names(df) != varDip]
+modMass = MASS::stepAIC(lm(as.formula(paste(varDip," ~ ",paste(colonne,collapse = " * "))), data = df))
+
+naDf = as.data.frame(sapply(1:ncol(df),
+                            function(c) is.na(df[,varDip]) & is.na(df[,c])))
+names(naDf) = names(df)
+# seleziono le colonne con almeno un NA
+naDf = naDf[,sapply(1:ncol(naDf), function(c) sum(naDf[,c])>0)]
+
+
+# creo processo iterativo
+while(anyNA(df[,varDip]))
+{
+# indice colonne na
+indiceColonne = where_na(df[which(is.na(df[,varDip]))[1],])[,2]
+colonne = names(df)[-indiceColonne]
+modMass = MASS::stepAIC(lm(as.formula(paste(varDip," ~ ",paste(colonne,collapse = " * "))), data = df))
+
+righe = sapply(1:nrow(df),
+               function(r) sum(sapply(1:ncol(df),
+                                      function(c) is.na(df[r,c]))) == length(indiceColonne)) & is.na(df[,varDip])
+df[righe,varDip] = predict(modMass, newdata = df[righe,])
+}
+
+```
+#### Insulin
+
+Nell'ultimo caso basta fare un unico modello. 
+OOra tutti gli NA sono stati corretti.
+
+```{r}
+
+varDip = "insulin"
+colonne = names(df)[names(df) != varDip]
+modMass = MASS::stepAIC(lm(as.formula(paste(varDip," ~ ",paste(colonne,collapse = " * "))), data = df))
+
+righe = is.na(df[,varDip])
+
+df[righe,varDip] = predict(modMass, newdata = df[righe,])
+
+anyNA.data.frame(df)
+```
+## Modello glm
+
+Il modello senza le modifiche sugli NA è il seguente:
+
+```{r}
+modGlmNA = glm(diabetes ~ ., family = binomial, data = PimaIndiansDiabetes2)
+summary(modGlmNA)
+```
+Il seguente modello, invece, è stato prodotto con le modifichesugli NA:
+
+```{r}
+modGlm = glm(diabetes ~ ., family = binomial, data = df)
+summary(modGlm)
+```
+
+Fare un confronto sui due modelli tramite AIC non è opportuno in quanto sono stati utilizzati due dataset diversi, metodi migliori per testare i due modelli sono set validation, cross validation, ...
+
+```{r}
+# LOO-CV
+cv = boot::cv.glm(df, modGlm, K = nrow(df))
+cvNA = boot::cv.glm(na.omit(PimaIndiansDiabetes2), modGlmNA)
+data.frame("NA sistemati" = cv$delta,
+           "Dati grezzi" = cvNA$delta)
+```
+
+Secondo la cross validazione, metodo leave one out, il modello da scegliere è quello senza NA.
+Nel caso in cui sia presente un'osservazione con NA non sarà applicabile il modello, a meno che non venga fatto il "riempimento" degli NA, come fatto in precedenza.
+
+## Costruire curva ROC
+
+```{r}
+# modifico l'ordine dei livelli della variabile fattoriale
+df$diabetes = relevel(df$diabetes,"pos")
+
+set.seed(1)
+train = sample(1:nrow(df), .8 * nrow(df))
+modGlmTrain = glm(diabetes ~ ., 
+                  family = binomial, 
+                  data = df,
+                  subset = train)
+
+pred = predict(modGlmTrain, df[-train,], type = "response")
+
+curvaROC = function(pred, oss, dettaglio = 100)
+{
+  tpr = c(0)
+  fpr = c(0)
+  for(i in 1:(dettaglio - 1))
+  {
+    previsto = factor(ifelse(pred < (i/dettaglio), "pos", "neg"),
+                      levels = c("pos","neg"),
+                      labels = c("pos","neg"),
+                      ordered = T)
+    t = table(oss,previsto)
+    # sono invertiti perché  nella tabella mi metteva prima i negativi e poii i positivi, in alternativa era da cambiare l'ordine dei livelli della variabile fattoriale
+    if(length(t) == 4)
+    {
+      tpr = c(tpr, (t[1] / (t[1] + t[3]))) 
+      fpr = c(fpr, (t[2] / (t[2] + t[4])))
+    }else
+    {
+      tpr = c(tpr, 1)
+      fpr = c(fpr, (t[1] / (t[2] + t[1])))
+    }
+  }
+  tpr = c(tpr, 1)
+  fpr = c(fpr, 1)
+  return(data.frame(tpr,fpr))
+}
+
+plotROC = function(dfROC)
+{
+  ggplot(dfROC, aes(x = fpr, y = tpr)) +
+    geom_line(color = "blue") +
+    geom_line(aes(x = x, y = x),
+              data = data.frame(x = c(0,1)), # non è stato utilizzato abline per limitare la linea tra 0 e 1
+              color = "red") +
+    labs(x = "False Positive Rate",
+         y = "True Positive Rate",
+         title = "Curva ROC")
+}
+# maggiore è il dettaglio, più la funzione sarà a scalino, minore arà la variabile dettaglio, la curva sarà più liscia (smoothies)
+plotROC(curvaROC(pred, df$diabetes[-train], dettaglio = 20))
+```
+
+## Calcolare AUC
+
+L'AUC del modello si attesta al 87%, si può affermare che è un buon modello.
+
+```{r}
+calcoloAUC = function(dfROC)
+  return(sum(sapply(1:(length(dfROC$tpr) - 1),
+                    function(i) dfROC$tpr[i + 1] * (dfROC$fpr[i+1]-dfROC$fpr[i]))))
+
+
+calcoloAUC(curvaROC(pred, df$diabetes[-train], 500))
+```
+
+# Esercizio 2
+
+## Regressione logistica semiparametrica
+
+Di seguito un modello di regressione logistica semiparametrica, al cui interno sono state inserite spline cubiche e una polinomiale di secondo grado.
+
+```{r}
+modGlmSP = gam(diabetes ~ bs(triceps) + bs(insulin) + poly(age,degree = 2) + glucose + bs(mass) + bs(pedigree),
+               family = binomial,
+               data = df,
+               subset = train)
+summary(modGlmSP)
+```
+
+Un modello alternativo che considera le interazioni ma perde l'interpretabilità è il seguente.
+Dal punto di vista computazionale è molto pesante da elaborare, quindi non viene eseguito.
+
+```{r}
+varEsp = names(df)[names(df) != "diabetes"]
+splineCubiche = paste("bs(",varEsp, ")", sep = "", collapse = " + ")
+interazione = paste("ti(", paste(varEsp, collapse = ", "), ")", sep = "")
+formula = as.formula(paste("diabetes ~", splineCubiche, "+", interazione))
+# modGlmSPInterazioni = gam(formula, family = binomial, data = df)
+# summary(modGlmSPInterazioni)
+```
+
+## Albero di classificazione
+
+```{r}
+set.seed(1)
+modTree = rpart(diabetes ~ ., 
+                data = df,
+                subset = train,
+                method = "class",
+                control = rpart.control(minsplit = 5, cp = 0.00001))
+plot(modTree)
+```
+
+#### Potatura
+
+```{r}
+{
+  plotcp(modTree)
+  points(x = which.min(modTree$cptable[,"xerror"]),
+         y = min(modTree$cptable[,"xerror"]),
+         col = "red",
+         pch = 18)
+}
+```
+
+```{r}
+modTree = prune(modTree, 
+                cp = modTree$cptable[which.min(modTree$cptable[,"xerror"]),"CP"])
+rpart.plot(modTree, cex = .65)
+```
+
+## Confronto
+
+### Accuratezza
+
+```{r,warning=FALSE}
+predGlm = factor(ifelse(predict(modGlmSP, newdata = df[-train,], type = "response") > .5, "pos", "neg"))
+matConfGlm = confusionMatrix(predGlm, df$diabetes[-train])
+
+predTree = factor(predict(modTree, newdata = df[-train,], type = "class"))
+matConfTree = confusionMatrix(predTree, df$diabetes[-train])
+
+data.frame("Regressione lineare" = round(matConfGlm$overall,3),
+           "Albero di classificazione" = round(matConfTree$overall,3))
+```
+
+### Curva ROC
+
+#### Modello di regressione logistica semiparemtirca
+
+```{r}
+plotROC(curvaROC(predict(modGlmSP, newdata = df[-train,], type = "response"),
+                 df$diabetes[-train]))
+```
+
+#### Albero di classificazione 
+
+```{r}
+plotROC(curvaROC(predict(modTree, newdata = df[-train,], type = "prob")[,2],
+                 df$diabetes[-train]))
+```
+
+# Esercizio 3
+
+### Importo i dati
+
+```{r}
+data("iris")
+str(iris)
+```
+
+
+## Albero di classificazione
+
+L'albero di classificazione risulta essere con pochi nodi e quasi tutti i nodi terminali hanno solo classificazioni corrette. 
+Questo fa pensare che le specie tra loro siano molto diverse, ovvero che la varianza tra le specie sia decisamente maggiore che la varianza nelle specie.
+
+```{r}
+# campionamento
+set.seed(1)
+train = sample(1:nrow(iris), .7 * nrow(iris))
+
+# growing
+modTree = rpart(Species ~ ., 
+                data = iris,
+                subset = train,
+                method = "class",
+                control = rpart.control(minsplit = 5, cp = 0.00001))
+
+# potatura
+modTree = prune(modTree, 
+                cp = modTree$cptable[which.min(modTree$cptable[,"xerror"]),"CP"])
+rpart.plot(modTree, cex = .8)
+```
+
+## Matrice di confusione
+
+L'acccuratezza risulta molto elevata, anche se si intuiva già dal grafico soprastante.
+Durante il test solo una pianta è stata classificata erroneamente, questo porterà degli ottimi risultati per la specificità e la sensibilità delle varie classi che saranno quasi tutte uguali a 1.
+
+```{r}
+predTree = factor(predict(modTree, newdata = iris[-train,], type = "class"))
+matConfTree = confusionMatrix(predTree, iris$Species[-train])
+```
+
+
+
+```{r,warning=FALSE}
+cvms::plot_confusion_matrix(cvms::confusion_matrix(targets = iris$Species[-train],
+                                                   predictions = predict(modTree, 
+                                                                         newdata = iris[-train,],
+                                                                         type = "class"))$`Confusion Matrix`[[1]])
+```
 
