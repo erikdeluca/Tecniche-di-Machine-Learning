@@ -425,6 +425,20 @@ calcoloAUC = function(dfROC)
 calcoloAUC(curvaROC(pred, df$diabetes[-train], 500))
 ```
 
+```{r}
+set.seed(1)
+dfNoNA = na.omit(PimaIndiansDiabetes2)
+training = sample(1:nrow(dfNoNA),.7*nrow(dfNoNA))
+modGlmNA = glm(diabetes ~ ., 
+                  family = binomial, 
+                  data = dfNoNA,
+                  subset = training)
+
+
+calcoloAUC(curvaROC(predict(modGlmNA, dfNoNA[-training,], type = "response"), dfNoNA$diabetes[-training], 500))
+```
+
+
 # Esercizio 2
 
 ## Regressione logistica semiparametrica

@@ -1,0 +1,219 @@
+---
+title: "Laboratorio 8"
+author: "Erik De Luca"
+date: "2023-01-06"
+output: 
+  html_document:
+    df_print: "paged"
+---
+
+# Analisi esplorativa dei dati
+
+```{r, include=FALSE}
+library(gbm)
+library(insuranceData)
+library(randomForest)
+library(ROSE)
+library(dplyr)
+library(tidyverse)
+library(tree)
+library(smotefamily)
+library(ModelMetrics)
+library(ggplot2)
+```
+
+# Importazione dei dati
+
+```{r}
+data(dataOhlsson)
+df = tibble(dataOhlsson)
+df
+```
+
+Trasformo la variabile antskad e rimuovo skadkost.
+
+```{r}
+df = df[,-9]
+df$antskad = factor(ifelse(df$antskad > 0, T, F), labels = c("No claim", "Claim"))
+table(df$antskad)
+```
+
+# Suddivido i dati
+
+```{r}
+set.seed(1)
+train = sample(1:nrow(df), .85 * nrow(df))
+```
+
+
+# Amplifico i dati
+
+## ROSE
+```{r}
+dfRose = ROSE(antskad ~ . , data = df[train,], seed = 1)$data
+table(dfRose$antskad)
+```
+
+## SMOTE
+
+```{r}
+dfSmote = SMOTE(X = df[train,-8] %>% mutate_at("kon", as.numeric), target = as.numeric(df$antskad[train]))$data
+dfSmote$class = factor(dfSmote$class, labels = c("No claim", "Claim"))
+colnames(dfSmote)[8] = colnames(df)[8]
+dfSmote$kon = factor(dfSmote$kon, levels = c(1,2), labels = levels(df$kon))
+table(dfSmote$antskad)
+```
+
+## Sovracampionamento e sottocampionamento
+
+```{r}
+dfSovra = ovun.sample(antskad ~ .,
+                      data = df[train,],
+                      method = "over",
+                      p = 0.5, 
+                      seed = 1)$data
+table(dfSovra$antskad)
+```
+
+```{r}
+dfSotto = ovun.sample(antskad ~ .,
+                      data = df[train,],
+                      method = "under",
+                      p = 0.5, 
+                      seed = 1)$data
+table(dfSotto$antskad)
+```
+
+# Modelli di classificazione
+
+## Campionamento
+
+
+
+```{r}
+set.seed(1)
+trRose = sample(1:nrow(dfRose), .7 * nrow(dfRose))
+trSmote = sample(1:nrow(dfSmote), .7 * nrow(dfSmote))
+trSovra = sample(1:nrow(dfSovra), .7 * nrow(dfSovra))
+trSotto = sample(1:nrow(dfSotto), .7 * nrow(dfSotto))
+```
+
+
+## Albero di classificazione
+
+```{r}
+# dati originali
+modOrig = tree(antskad ~ ., data = df[train, ])
+predOrig = predict(modOrig, newdata = df[-train,],type = "class")
+# dati ROSE
+modRose = tree(antskad ~ ., data = dfRose)
+predRose = predict(modRose, newdata = df[-train,],type = "class")
+# dati SMOTE
+modSmote = tree(antskad ~ ., data = dfSmote)
+predSmote = predict(modSmote, newdata = df[-train,],type = "class")
+# dati sovracampionati
+modSovra = tree(antskad ~ ., data = dfSovra)
+predSovra = predict(modSovra, newdata = df[-train,],type = "class")
+# dati sottocampionati
+modSotto = tree(antskad ~ ., data = dfSotto)
+predSotto = predict(modSotto, newdata = df[-train,],type = "class")
+```
+
+### AUC
+
+```{r}
+listaCampionamenti = paste("pred",c("Orig", "Rose", "Smote", "Sovra", "Sotto"), sep = "")
+tibble(Campionamento = listaCampionamenti,
+       AUC = sapply(1:5, function(i) auc(df$antskad[-train],get(listaCampionamenti[i]))))
+```
+
+### Matrice di confusione
+
+```{r}
+caret::confusionMatrix(table(df$antskad[-train],predRose),positive = "Claim")
+```
+### Curva ROC
+
+La funzione per la curva ROC, costruita nel precedente laboratorio, è stata modificata per ottenere molteplici curve ROC su un unico grafico. 
+
+```{r}
+curvaROC = function(pred, oss, dettaglio = 100)
+{
+  tpr = c(0)
+  fpr = c(0)
+  for(i in 1:(dettaglio - 1))
+  {
+    if(!is.factor(pred))
+    {
+      etichetta = levels(oss)
+      previsto = factor(
+        ifelse(pred[,2] < (i / dettaglio), etichetta[1], etichetta[2]),
+        levels = etichetta,
+        labels = etichetta,
+        ordered = T
+      )
+    }else{
+      previsto = pred
+    }
+    t = table(oss,previsto)
+    # sono invertiti perché  nella tabella mi metteva prima i negativi e poii i positivi, in alternativa era da cambiare l'ordine dei livelli della variabile fattoriale
+    if(length(t) == 4)
+    {
+      tpr = c(tpr, (t[1] / (t[1] + t[3]))) 
+      fpr = c(fpr, (t[2] / (t[2] + t[4])))
+    }else
+    {
+      tpr = c(tpr, 1)
+      fpr = c(fpr, (t[1] / (t[2] + t[1])))
+    }
+  }
+  tpr = c(tpr, 1)
+  fpr = c(fpr, 1)
+  return(data.frame(tpr,fpr))
+}
+
+plotROC = function(dfROC, nomiCurveRoc)
+{
+  if(!is.list(dfROC))
+  {
+    gg =   ggplot(dfROC, aes(x = fpr, y = tpr)) +
+      geom_line(color = "blue") +
+      geom_line(aes(x = x, y = x),
+                data = data.frame(x = c(0, 1)), # non è stato utilizzato abline per limitare la linea tra 0 e 1
+                color = "red") +
+      labs(x = "False Positive Rate",
+           y = "True Positive Rate",
+           title = "Curva ROC")
+  }else
+  {
+    ROC = data.frame()
+    Campionamento = c()
+    for(i in 1:length(dfROC))
+    {
+      ROC = rbind(ROC, dfROC[[i]])
+      Campionamento = c(Campionamento, rep(nomiCurveRoc[i], nrow(dfROC[[1]])))
+    }
+    ROC = cbind(ROC, Campionamento)
+    
+    gg =   ggplot(ROC, aes(x = fpr, y = tpr, color = Campionamento)) +
+      geom_line() +
+      geom_line(aes(x = x, y = x, color = "bisettrice"),
+                data = data.frame(x = c(0, 1))) + # non è stato utilizzato abline per limitare la linea tra 0 e 1
+      labs(x = "False Positive Rate",
+           y = "True Positive Rate",
+           title = "Curva ROC") +
+      scale_color_manual(values = RColorBrewer::brewer.pal(length(dfROC) + 1,"Pastel2"))
+
+  }
+  return(gg)
+}
+# maggiore è il dettaglio, più la funzione sarà a scalino, minore arà la variabile dettaglio, la curva sarà più liscia (smoothies)
+
+```
+
+```{r}
+plotROC(dfROC = lapply(1:5, function(i) curvaROC(get(listaCampionamenti[i]), df$antskad[-train], dettaglio = 20)),
+        nomiCurveRoc = listaCampionamenti)
+```
+
+

@@ -1,0 +1,322 @@
+---
+title: "Laboratorio8"
+author: "Erik De Luca"
+date: "2022-12-21"
+output: 
+  html_document:
+    df_print: "paged"
+---
+
+# inizio
+
+```{r setup, include=FALSE}
+library(gbm)
+
+library(dplyr)
+library(tidyverse)
+library(ROSE)
+library(caTools)
+library(rpart)
+library(caret)
+library(insuranceData)
+library(randomForest)
+```
+
+```{r}
+data("hacide")
+table(hacide.train$cls)
+```
+
+```{r}
+plot(hacide.train$x1,hacide.train$x2,col=hacide.train$cls, pch=20)
+```
+
+```{r}
+treeimb <- rpart(cls ~ ., data = hacide.train)
+pred.treeimb <- predict(treeimb, newdata = hacide.test)
+accuracy.meas(hacide.test$cls, pred.treeimb[,2])
+```
+
+```{r}
+data.bal.ov <- ovun.sample(cls ~ ., data = hacide.train, method = "over",
+                           p = 0.5, seed = 1)$data
+table(data.bal.ov$cls)
+```
+
+```{r}
+data.bal.un <- ovun.sample(cls ~ ., data = hacide.train, method = "under",
+                           p = 0.5, seed = 1)$data
+table(data.bal.un$cls)
+
+```
+
+```{r}
+plot(data.bal.un$x1,data.bal.un$x2,col=data.bal.un$cls, pch=20)
+
+```
+
+
+```{r}
+data.bal.ou <- ovun.sample(cls ~ ., data = hacide.train, method = "both",
+                           N = 1000, p = 0.5, seed = 1)$data
+table(data.bal.ou$cls)
+```
+
+```{r}
+data.rose <- ROSE(cls ~ ., data = hacide.train, seed = 1)$data
+table(data.rose$cls)
+```
+
+```{r}
+plot(data.rose$x1,data.rose$x2,col=data.rose$cls, pch=20)
+```
+
+
+
+```{r}
+tree.rose <- rpart(cls ~ ., data = data.rose)
+tree.ov <- rpart(cls ~ ., data = data.bal.ov)
+tree.un <- rpart(cls ~ ., data = data.bal.un)
+tree.ou <- rpart(cls ~ ., data = data.bal.ou)
+```
+
+
+```{r}
+pred.tree.rose <- predict(tree.rose, newdata = hacide.test)
+pred.tree.ov <- predict(tree.ov, newdata = hacide.test)
+pred.tree.un <- predict(tree.un, newdata = hacide.test)
+pred.tree.ou <- predict(tree.un, newdata = hacide.test)
+```
+
+
+```{r}
+{
+  roc.curve(hacide.test$cls, pred.tree.rose[,2])
+  roc.curve(hacide.test$cls, pred.tree.ov[,2], add.roc = TRUE, col = 2, lty = 2)
+  roc.curve(hacide.test$cls, pred.tree.un[,2], add.roc = TRUE, col = 3, lty = 3)
+  roc.curve(hacide.test$cls, pred.tree.ou[,2], add.roc = TRUE, col = 4, lty = 4)
+}
+```
+
+
+
+
+```{r}
+library(smotefamily)
+data.smote<-SMOTE(X=hacide.train[,-1],target=hacide.train[,1])
+data.sm<-data.smote$data
+plot(data.sm$x1,data.sm$x2,col=(as.numeric(data.sm$class)+1), pch=20)
+```
+
+```{r}
+tree.smote <- rpart(class ~ ., data = data.sm)
+pred.tree.smote <- predict(tree.smote, newdata = hacide.test)
+roc.curve(hacide.test$cls, pred.tree.smote[,2])
+```
+
+```{r}
+dat <- read.csv("/Users/Erik/OneDrive - Università degli Studi di Trieste/Dati/churn.csv", header = T)
+dim(dat)
+names(dat)
+head(dat)
+```
+
+```{r}
+set.seed(123)
+trainID <- createDataPartition(dat$churn, p = .75, 
+                                  list = FALSE, 
+                                  times = 1)
+testID <- setdiff(1:NROW(dat),trainID)
+
+dat_train <- dat[trainID,]
+dat_test <- dat[testID,]
+dim(dat_train)
+dim(dat_test)
+```
+
+```{r}
+head(dat_test)
+table(dat_train$state)
+table(dat_train$area_code)
+
+```
+
+
+
+```{r}
+table(dat_train$churn)
+tr = table(dat_train$churn)[2] / NROW(dat_train)
+
+# Intrefaccia standard per glm
+mod_log  <-  glm((churn == "yes" )~., data = dat_train, family = "binomial")
+pred_log <-  predict(mod_log, newdata = dat_test,type = "response")
+
+# misure di performance
+res_log <- confusionMatrix(table(dat_test$churn, ifelse(pred_log > tr, "yes", "no")))
+res_log_st <- confusionMatrix(table(dat_test$churn, ifelse(pred_log > .5, "yes", "no")))
+res_log$auc <- ModelMetrics::auc(dat_test$churn, pred_log)
+
+res_log$overall %>% round(3)
+res_log_st$overall %>% round(3)
+
+res_log$byClass %>% round(3)
+res_log_st$byClass %>% round(3)
+```
+
+```{r}
+library(glmnet)
+# Lasso con modalità standard
+X_train = model.matrix(churn~., data = dat_train)
+X_test = model.matrix(churn~., data = dat_test)
+mod_lasso_cv = cv.glmnet(x = X_train, 
+             y = dat_train$churn,
+             nfolds = 5, 
+             family = "binomial")
+coef(mod_lasso_cv)
+pred_lasso = predict(mod_lasso_cv, newx = X_test,type = "response")
+#performance
+(table(dat_test$churn, (pred_lasso > tr)))
+res_lasso = confusionMatrix(table(dat_test$churn, ifelse(pred_lasso > tr, "yes", "no")))
+res_lasso$auc = ModelMetrics::auc(dat_test$churn, pred_lasso)
+
+res_lasso_st = confusionMatrix(table(dat_test$churn, ifelse(pred_lasso > .5, "yes", "no")))
+
+
+res_lasso$overall %>% round(3)
+res_lasso_st$overall %>% round(3)
+
+res_lasso$byClass %>% round(3)
+res_lasso_st$byClass %>% round(3)
+```
+
+# Data Insurance
+
+```{r}
+
+data(dataOhlsson)
+df = dataOhlsson
+head(df)
+```
+Trasformo la variabile antskad da numerica a categorica e osservo come è distribuita.
+
+```{r}
+df$antskad = factor(ifelse(df$antskad > 0, T, F), labels = c("No claim", "Claim"))
+table(df$antskad)
+```
+Divido i dati in train set e test set
+
+```{r}
+set.seed(1)
+train = sample(1:nrow(df), .8 * nrow(df))
+```
+
+# Analisi esplorativa dei dati
+
+```{r,warning=F}
+PerformanceAnalytics::chart.Correlation(df[sample(1:nrow(df),200),] %>% mutate_at(c("kon","antskad"),as.numeric))
+```
+
+
+Visualizzo i dati
+
+```{r}
+plot(df$fordald,df$agrald)
+```
+
+
+
+## Amplio i dati 
+
+```{r}
+dfRose = ROSE(antskad ~ . , data = df[train,], seed = 1)$data
+table(dfRose$antskad)
+set.seed(1)
+trRose = sample(1:nrow(dfRose), .8 * nrow(dfRose))
+```
+
+```{r}
+PerformanceAnalytics::chart.Correlation(dfRose[sample(1:nrow(dfRose),200),] %>% mutate_at(c("kon","antskad"),as.numeric))
+```
+
+
+
+```{r}
+rfRose = randomForest(antskad ~ ., data = dfRose[trRose,])
+rf = randomForest(antskad ~ ., data = df[train, ])
+modBoos = gbm(antskad ~ .,
+              data = dfRose[trRose,],
+              distribution = "gaussian",
+              n.trees = 1000,
+              interaction.depth = 10)
+
+modBoos %>% summary
+
+
+```
+
+```{r}
+ModelMetrics::auc(dfRose$antskad[-trRose], pred)
+pred = predict(rfRose, newdata = dfRose[-trRose,])
+pred = as.factor(ifelse(predict(modBoos, newdata = dfRose[-trRose,])<1.5,"Claim","No claim"))
+ModelMetrics::auc(dfRose$antskad[-trRose],pred)
+table(dfRose$antskad[-trRose], pred)
+confusionMatrix(table(dfRose$antskad[-trRose],pred),positive = "Claim")
+```
+
+curvaROC = function(pred, oss, dettaglio = 100)
+{
+  tpr = c(0)
+  fpr = c(0)
+  for(i in 1:(dettaglio - 1))
+  {
+    if(!is.factor(pred))
+    {
+      etichetta = levels(oss)
+      previsto = factor(
+        ifelse(pred[,2] < (i / dettaglio), etichetta[1], etichetta[2]),
+        levels = etichetta,
+        labels = etichetta,
+        ordered = T
+      )
+    }else{
+      previsto = pred
+    }
+    t = table(oss,previsto)
+    # sono invertiti perché  nella tabella mi metteva prima i negativi e poii i positivi, in alternativa era da cambiare l'ordine dei livelli della variabile fattoriale
+    if(length(t) == 4)
+    {
+      tpr = c(tpr, (t[1] / (t[1] + t[3]))) 
+      fpr = c(fpr, (t[2] / (t[2] + t[4])))
+    }else
+    {
+      tpr = c(tpr, 1)
+      fpr = c(fpr, (t[1] / (t[2] + t[1])))
+    }
+  }
+  tpr = c(tpr, 1)
+  fpr = c(fpr, 1)
+  return(data.frame(tpr,fpr))
+}
+
+plotROC = function(dfROC, add = F)
+{
+  gg = NULL
+  if(!add)
+    gg =   ggplot(dfROC, aes(x = fpr, y = tpr))
+  gg = gg +
+    geom_line(color = "blue") +
+    geom_line(aes(x = x, y = x),
+              data = data.frame(x = c(0,1)), # non è stato utilizzato abline per limitare la linea tra 0 e 1
+              color = "red") +
+    labs(x = "False Positive Rate",
+         y = "True Positive Rate",
+         title = "Curva ROC")
+  if(!add)
+    gg
+  return(gg)
+}
+# maggiore è il dettaglio, più la funzione sarà a scalino, minore arà la variabile dettaglio, la curva sarà più liscia (smoothies)
+plotROC(curvaROC(predict(rf, newdata = dfRose[-trRose,], type = "prob"), dfRose$antskad[-trRose], dettaglio = 20))
+```{r}
+```
+

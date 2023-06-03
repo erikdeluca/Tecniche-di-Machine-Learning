@@ -1,0 +1,458 @@
+---
+title: "Laboratorio 8"
+author: "Erik De Luca"
+date: "2023-01-06"
+output: 
+  html_document:
+    df_print: "paged"
+---
+
+# Analisi esplorativa dei dati
+
+```{r, include=FALSE}
+library(gbm)
+library(insuranceData)
+library(randomForest)
+library(ROSE)
+library(dplyr)
+library(tidyverse)
+library(tree)
+library(smotefamily)
+library(ModelMetrics)
+library(ggplot2)
+library(data.table)
+```
+
+
+# Importazione dei dati
+
+```{r}
+data(dataOhlsson)
+df = tibble(dataOhlsson)
+df
+```
+
+Trasformo la variabile antskad e rimuovo skadkost.
+
+```{r}
+df = df[,-9]
+df$antskad = factor(ifelse(df$antskad > 0, T, F), labels = c("No claim", "Claim"))
+table(df$antskad)
+```
+
+# Suddivido i dati
+
+```{r}
+set.seed(1)
+train = sample(1:nrow(df), .85 * nrow(df))
+```
+
+
+# Amplifico i dati
+
+## ROSE
+```{r}
+dfRose = ROSE(antskad ~ . , data = df[train,], seed = 1)$data
+table(dfRose$antskad)
+```
+
+## SMOTE
+
+```{r}
+dfSmote = SMOTE(X = df[train,-8] %>% mutate_at("kon", as.numeric), target = as.numeric(df$antskad[train]))$data
+dfSmote$class = factor(dfSmote$class, labels = c("No claim", "Claim"))
+colnames(dfSmote)[8] = colnames(df)[8]
+dfSmote$kon = factor(dfSmote$kon %>% round(), levels = c(1,2), labels = levels(df$kon))
+table(dfSmote$antskad)
+```
+
+## Sovracampionamento e sottocampionamento
+
+```{r}
+dfSovra = ovun.sample(antskad ~ .,
+                      data = df[train,],
+                      method = "over",
+                      p = 0.5, 
+                      seed = 1)$data
+table(dfSovra$antskad)
+```
+
+```{r}
+dfSotto = ovun.sample(antskad ~ .,
+                      data = df[train,],
+                      method = "under",
+                      p = 0.5, 
+                      seed = 1)$data
+table(dfSotto$antskad)
+```
+
+# Modelli di classificazione
+
+Verranno utilizzati diversi modelli e confrontati tra loro tramite AUC, i modelli utilizzatti sono: alberi di classificazione, random forest, boosting e regressione logistica binomiale.
+
+## Albero di classificazione
+
+Viene creato un modello per ogni tecnica di ricampionamento utilizzata, oltre al modello con i dati di training originali.
+Dopodiché verranno predetti i valori, tramite i modelli appena ottenuti, utilizzando il data set di test con i dati originali per tutti quanti.
+
+Nella funzione predict, viene evitato l'utilizzo della modalità type = "class" in modo da avere un numero maggiore di punti per tracciare la curva ROC e di poter modificare il valore soglia nella matrice di confusione. Ciò ci permette di avere una maggiore flessibilità nell'analisi dei risultati del modello e di ottenere una migliore comprensione delle prestazioni del modello stesso.
+
+```{r}
+# dati originali
+modOrig = tree(antskad ~ ., data = df[train, ])
+predOrig = predict(modOrig, newdata = df[-train,], type = "vector")
+# dati ROSE
+modRose = tree(antskad ~ ., data = dfRose)
+predRose = predict(modRose, newdata = df[-train,], type = "vector")
+# dati SMOTE
+modSmote = tree(antskad ~ ., data = dfSmote)
+predSmote = predict(modSmote, newdata = df[-train,], type = "vector")
+# dati sovracampionati
+modSovra = tree(antskad ~ ., data = dfSovra)
+predSovra = predict(modSovra, newdata = df[-train,], type = "vector")
+# dati sottocampionati
+modSotto = tree(antskad ~ ., data = dfSotto)
+predSotto = predict(modSotto, newdata = df[-train,],type = "vector")
+```
+
+### AUC
+
+Confronto i diversi modelli attraverso l'AUC, ovvero l'area sotto la curva ROC.
+
+I modelli allenati con i data frame ottenuti dalle tecniche di sovracampionamento e sottocampionamento risultano performare meglio degli altri.
+
+```{r}
+listaCampionamenti = paste("pred",c("Orig", "Rose", "Smote", "Sovra", "Sotto"), sep = "")
+listaModelli = paste("mod",c("Orig", "Rose", "Smote", "Sovra", "Sotto"), sep = "")
+tibble(Campionamento = listaCampionamenti,
+       AUC = sapply(1:5, function(i) auc(df$antskad[-train],
+                                         predict(get(listaModelli[i]), newdata = df[-train,], type = "class"))))
+```
+
+### Matrice di confusione
+
+Per stampare le matrici di confusione per ciascun modello, è stata creata una funzione che genera una tabella in cui le righe corrispondono alle unità statistiche osservate e le colonne rappresentano i valori predetti dai diversi modelli utilizzati. 
+La funzione è in grado di lavorare con i dati prodotti dalle funzioni predict dei vari modelli (ad esempio, predict.tree, predict.glm, ecc.). 
+Questo ci permette di valutare l'accuratezza dei modelli utilizzando diverse tecniche di ricampionamento e di confrontare i risultati ottenuti con ciascun modello.
+
+```{r}
+multiConfusionMatrix = function(oss, predLista, nomiModelli, valoreSoglia = .5)
+{
+  if(is.matrix(predLista[[1]]))
+  {
+    for(i in 1:length(predLista))
+      predLista[[i]] = factor(ifelse(predLista[[i]][,2] < valoreSoglia, 0, 1), 
+                            levels = c(0,1),
+                            labels = c("No claim", "Claim"))
+  }else if(is.numeric(predLista[[1]]))
+  {
+    for(i in 1:length(predLista))
+      predLista[[i]] = factor(ifelse(predLista[[i]] < valoreSoglia, 0, 1), 
+                              levels = c(0,1),
+                              labels = c("No claim", "Claim"))
+  }
+  tabelle = data.frame(table(oss, predLista[[1]])[,1], 
+                       table(oss, predLista[[1]])[,2])
+  if(length(predLista) > 1)
+  {
+    for(i in 2:length(predLista))
+    {
+      tabelle = cbind(tabelle,
+                      table(oss, predLista[[i]])[,1], 
+                      table(oss, predLista[[i]])[,2])
+    }
+  }
+  colnames(tabelle)[c(1:length(predLista)*2-1)] = paste(rownames(tabelle)[1], nomiModelli)
+  colnames(tabelle)[1:length(predLista)*2] = paste(rownames(tabelle)[2], nomiModelli)
+  return(tabelle)
+}
+```
+
+
+```{r}
+multiConfusionMatrix(df$antskad[-train],
+                     lapply(1:5, function(i) get(listaCampionamenti[i])),
+                     listaCampionamenti)
+```
+
+### Curva ROC
+
+La funzione per la curva ROC, costruita nel precedente laboratorio, è stata modificata per ottenere molteplici curve ROC (ricavate dai diversi modelli) su un unico grafico. 
+
+```{r}
+curvaROC = function(pred, oss, dettaglio = 100)
+{
+  tpr = c(0)
+  fpr = c(0)
+  for(i in 1:(dettaglio - 1))
+  {
+    if(!is.factor(pred))
+    {
+      etichetta = levels(oss)
+      if(pred %>% dim %>% is.null)
+      {
+        previsto = factor(
+        ifelse(pred < (i / dettaglio), etichetta[1], etichetta[2]),
+        levels = etichetta,
+        labels = etichetta,
+        ordered = T
+      )
+      }
+      else
+      {
+        previsto = factor(
+        ifelse(pred[,2] < (i / dettaglio), etichetta[1], etichetta[2]),
+        levels = etichetta,
+        labels = etichetta,
+        ordered = T
+      )
+      }
+    }else{
+      previsto = pred
+    }
+    t = table(oss,previsto)
+    # sono invertiti perché  nella tabella mi metteva prima i negativi e poii i positivi, in alternativa era da cambiare l'ordine dei livelli della variabile fattoriale
+    if(length(t) == 4)
+    {
+      tpr = c(tpr, (t[1] / (t[1] + t[3]))) 
+      fpr = c(fpr, (t[2] / (t[2] + t[4])))
+    }else
+    {
+      tpr = c(tpr, 1)
+      fpr = c(fpr, (t[1] / (t[2] + t[1])))
+    }
+  }
+  tpr = c(tpr, 1)
+  fpr = c(fpr, 1)
+  return(data.frame(tpr,fpr))
+}
+
+plotROC = function(dfROC, nomiCurveRoc)
+{
+  if(!is.list(dfROC))
+  {
+    gg =   ggplot(dfROC, aes(x = fpr, y = tpr)) +
+      geom_line(color = "blue") +
+      geom_line(aes(x = x, y = x),
+                data = data.frame(x = c(0, 1)), # non è stato utilizzato abline per limitare la linea tra 0 e 1
+                color = "red") +
+      labs(x = "False Positive Rate",
+           y = "True Positive Rate",
+           title = "Curva ROC")
+  }else
+  {
+    ROC = data.frame()
+    Campionamento = c()
+    for(i in 1:length(dfROC))
+    {
+      ROC = rbind(ROC, dfROC[[i]])
+      Campionamento = c(Campionamento, rep(nomiCurveRoc[i], nrow(dfROC[[1]])))
+    }
+    ROC = cbind(ROC, Campionamento)
+    
+    gg =   ggplot(ROC, aes(x = fpr, y = tpr, color = Campionamento)) +
+      geom_line(linewidth = 1) +
+      geom_line(aes(x = x, y = x, color = "bisettrice"),
+                data = data.frame(x = c(0, 1))) + # non è stato utilizzato abline per limitare la linea tra 0 e 1
+      labs(x = "False Positive Rate",
+           y = "True Positive Rate",
+           title = "Curva ROC") +
+      scale_color_manual(values = RColorBrewer::brewer.pal(length(dfROC) + 1,"Pastel2"))
+
+  }
+  return(gg)
+}
+# maggiore è il dettaglio, più la funzione sarà a scalino, minore arà la variabile dettaglio, la curva sarà più liscia (smoothies)
+
+```
+
+Un elemento interessante è che Smote scende al di sotto della soglia di 0,5 in un determinato punto della curva ROC, ovvero al di sotto della bisettrice del primo e terzo quadrante. 
+
+Inoltre, attraverso la curva ROC è possibile comprendere meglio quale tecnica di campionamento sia più adeguata in base al valore soglia che si desidera utilizzare. 
+In alcuni punti, Smote e ROSE mostrano prestazioni simili a quelle dei due modelli con l'AUC migliore. 
+Ciò indica che queste tecniche di campionamento possono essere utilizzate con successo in determinate situazioni.
+
+
+```{r}
+plotROC(dfROC = lapply(1:5, function(i) curvaROC(get(listaCampionamenti[i]), df$antskad[-train], dettaglio = 20)),
+        nomiCurveRoc = listaCampionamenti)
+```
+
+## Random Forest
+
+```{r}
+# dati originali
+modOrig = randomForest(antskad ~ ., data = df[train, ])
+predOrig = predict(modOrig, newdata = df[-train,],type = "vote")
+# dati ROSE
+modRose = randomForest(antskad ~ ., data = dfRose)
+predRose = predict(modRose, newdata = df[-train,],type = "prob")
+# dati SMOTE
+modSmote = randomForest(antskad ~ ., data = dfSmote)
+predSmote = predict(modSmote, newdata = df[-train,],type = "prob")
+# dati sovracampionati
+modSovra = randomForest(antskad ~ ., data = dfSovra)
+predSovra = predict(modSovra, newdata = df[-train,],type = "prob")
+# dati sottocampionati
+modSotto = randomForest(antskad ~ ., data = dfSotto)
+predSotto = predict(modSotto, newdata = df[-train,],type = "prob")
+```
+
+### AUC
+
+In questo caso il modello migliore risulta quello eseguito tramite la tecnica del sottocampionamento, mentre, il secondo migliore è quello eseguito tramite ROSE.
+
+```{r}
+tibble(Campionamento = listaCampionamenti,
+       AUC = sapply(1:5, function(i) auc(df$antskad[-train],
+                                         predict(get(listaModelli[i]), 
+                                                 newdata = df[-train,],
+                                                 type = "class")
+                                         )
+                    )
+       )
+```
+
+### Matrice di confusione
+
+Osservando i due modelli migliori si nota che posizionando il valore soglia a 0.5, si ottiene per il sottocampionamento 65 Claim previsti sui 88 ma con ben 3045 falsi Claim previsti.
+Invece, con ROSE vengono previsti 26 ma al contempo i falsi positivi sono 1018.
+
+```{r}
+multiConfusionMatrix(df$antskad[-train],
+                     lapply(1:5, function(i) get(listaCampionamenti[i])),
+                     listaCampionamenti,
+                     valoreSoglia = .5)
+```
+
+### Curva ROC
+
+```{r}
+plotROC(dfROC = lapply(1:5, function(i) curvaROC(get(listaCampionamenti[i]), df$antskad[-train], dettaglio = 20)),
+        nomiCurveRoc = listaCampionamenti)
+```
+
+## Boosting
+
+```{r}
+# dati originali
+modOrig = gbm(antskad ~ ., 
+              data = df[train, ],
+              distribution = "gaussian",
+              n.trees = 500,
+              interaction.depth = 10)
+predOrig = predict(modOrig, newdata = df[-train,]) - 1
+# dati ROSE
+modRose = gbm(antskad ~ ., 
+              data = dfRose,
+              distribution = "gaussian",
+              n.trees = 500,
+              interaction.depth = 10)
+predRose = predict(modRose, newdata = df[-train,]) - 1
+# dati SMOTE
+modSmote = gbm(antskad ~ .,
+               data = dfSmote,
+               distribution = "gaussian",
+               n.trees = 500,
+               interaction.depth = 10)
+predSmote = predict(modSmote, newdata = df[-train,]) - 1
+# dati sovracampionati
+modSovra = gbm(antskad ~ ., data = dfSovra,
+              distribution = "gaussian",
+              n.trees = 500,
+              interaction.depth = 10)
+predSovra = predict(modSovra, newdata = df[-train,]) - 1
+# dati sottocampionati
+modSotto = gbm(antskad ~ ., data = dfSotto,
+              distribution = "gaussian",
+              n.trees = 500,
+              interaction.depth = 10)
+predSotto = predict(modSotto, newdata = df[-train,]) - 1
+```
+
+### AUC
+
+Anche nel boosting risulta essere il migliore il sottocampionamento, mentre il Smote il peggiore.
+
+```{r}
+tibble(Campionamento = listaCampionamenti,
+       AUC = sapply(1:5, function(i) auc(df$antskad[-train],
+                                         factor(ifelse(get(listaCampionamenti[i])<.5,0,1),
+                                                levels = c(0,1),
+                                                labels = c("No claim", "Claim")))))
+```
+
+### Matrice di confusione
+
+```{r}
+multiConfusionMatrix(df$antskad[-train],
+                     lapply(1:5, function(i) get(listaCampionamenti[i])),
+                     listaCampionamenti)
+```
+
+### Curva ROC
+
+```{r}
+plotROC(dfROC = lapply(1:5, function(i) curvaROC(get(listaCampionamenti[i]), df$antskad[-train], dettaglio = 20)),
+        nomiCurveRoc = listaCampionamenti)
+```
+
+
+
+
+## GLM
+
+```{r}
+# dati originali
+modOrig = glm(antskad ~ ., data = df[train, ], family = binomial)
+predOrig = predict(modOrig, newdata = df[-train,],type = "response")
+# dati ROSE
+modRose = glm(antskad ~ ., family = binomial, data = dfRose)
+predRose = predict(modRose, newdata = df[-train,],type = "response")
+# dati SMOTE
+modSmote = glm(antskad ~ ., family = binomial, data = dfSmote)
+predSmote = predict(modSmote, newdata = df[-train,],type = "response")
+# dati sovracampionati
+modSovra = glm(antskad ~ ., family = binomial, data = dfSovra)
+predSovra = predict(modSovra, newdata = df[-train,],type = "response")
+# dati sottocampionati
+modSotto = glm(antskad ~ ., family = binomial, data = dfSotto)
+predSotto = predict(modSotto, newdata = df[-train,],type = "response")
+```
+
+### AUC
+
+In questo caso, utilizzando i dati originali si ottiene perfino un AUC minore di 0.5, mentre le varie tecniche di ricampionamento performano tutte simili e molto bene.
+Infatti la regressione logistica è il modello che performa meglio in questo problema, insieme alla tencinca del sovracampionamento, anche se osservando la curva ROC si potrebbe usare una diversa tecnica di ricampionamento in modo tale che il modello performi meglio.
+
+```{r}
+tibble(Campionamento = listaCampionamenti,
+       AUC = sapply(1:5, function(i) auc(df$antskad[-train],
+                                         factor(ifelse(get(listaCampionamenti[i])<.5,0,1),
+                                                levels = c(0,1),
+                                                labels = c("No claim", "Claim")))))
+```
+
+### Matrice di confusione
+
+
+```{r}
+multiConfusionMatrix(df$antskad[-train],
+                     lapply(1:5, function(i) get(listaCampionamenti[i])),
+                     listaCampionamenti)
+```
+
+Di seguito è stampata una matrice di confusione eseguita sulla tecnica di ricampionamento ROSE e tutti i valori relativi ad essa.
+
+```{r}
+caret::confusionMatrix(table(df$antskad[-train],factor(ifelse(predRose<.5,0,1),
+                                                levels = c(0,1),
+                                                labels = c("No claim", "Claim"))),positive = "Claim")
+```
+
+### Curva ROC
+
+```{r}
+plotROC(dfROC = lapply(1:5, function(i) curvaROC(get(listaCampionamenti[i]), df$antskad[-train], dettaglio = 20)),
+        nomiCurveRoc = listaCampionamenti)
+```
